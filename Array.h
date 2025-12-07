@@ -220,13 +220,13 @@ namespace Potato {
 			Alloc& allocator;
 		};
 		/**
-		 * @brief 批量构造元素
+		 * @brief 批量零初始化或者调用默认构造函数在一块内存上默认构造
 		 * @param start: 起始位置
 		 * @param count: 构造数量
 		 * @param allocator: 分配器
 		 */
 		template <typename Alloc>
-		constexpr AllocPointer<Alloc> BatchOfConstruction(AllocPointer<Alloc> start, AllocSize<Alloc> count, Alloc& allocator){
+		constexpr AllocPointer<Alloc> BatchOfZeroConstruction(AllocPointer<Alloc> start, AllocSize<Alloc> count, Alloc& allocator){
 			using pointer = typename Alloc::value_type*;
 			using size_type = typename std::allocator_traits<Alloc>::size_type;
 			using value_type = std::remove_pointer_t<std::remove_cv_t<pointer>>;
@@ -248,62 +248,35 @@ namespace Potato {
 				}
 				return start + count;
 			}
+
+			// C++20 中 uninitialized_value_construct_n 不是 constexpr
 			// std::uninitialized_value_construct_n(Unfancy(start), count);
-			//
-			// return start + count;
 			ConstructBackoutGuard<Alloc> Guard{ start, allocator };
-			for (size_type i=0; i < count; ++i){
+			for (; 0 < count; --count){
 				Guard.Append();
 			}
 			return Guard.Release();
 		}
-	};
 
-	template <typename ElementTypeWrapper>
-	struct ArrayData {
-		using value_type      = typename ElementTypeWrapper::value_type;
-		using size_type       = typename ElementTypeWrapper::size_type;
-		using difference_type = typename ElementTypeWrapper::difference_type;
-		using pointer         = typename ElementTypeWrapper::pointer;
-		using const_pointer   = typename ElementTypeWrapper::const_pointer;
-		using reference       = typename ElementTypeWrapper::reference;
-		using const_reference = typename ElementTypeWrapper::const_reference;
+		/**
+		 * @brief 批量使用值进行对内存进行初始化
+		 * @param start: 起始位置
+		 * @param count: 构造数量
+		 * @param value: 初始化值
+		 * @param allocator: 分配器
+		 */
+		template <typename Alloc>
+		constexpr AllocPointer<Alloc> BatchOfFillConstruction(AllocPointer<Alloc> start, AllocSize<Alloc> count, const typename Alloc::value_type& value, Alloc& allocator){
+			using Ty = typename Alloc::value_type;
+			// memset 路径: 对于标量类型且非 volatile 类型可以使用 memset 优化
 
-		constexpr ArrayData() noexcept
-			: start()
-			, finish()
-			, end_of_storage(){}
-
-		constexpr ArrayData(pointer start, pointer finish, pointer end) noexcept
-			: start(start)
-			, finish(finish)
-			, end_of_storage(end){}
-
-		constexpr void CopyData(ArrayData const& other) noexcept(true) {
-			start = other.start;
-			finish = other.finish;
-			end_of_storage = other.end_of_storage;
+			ConstructBackoutGuard<Alloc> Guard{ start, allocator };
+			for (; 0 < count; --count){
+				Guard.Append();
+			}
+			return Guard.Release();
 		}
 
-		constexpr void SwapData(ArrayData& other) noexcept {
-			std::swap(start, other.start);
-			std::swap(finish, other.finish);
-			std::swap(end_of_storage, other.end_of_storage);
-		}
-
-		constexpr void StealData(ArrayData& other) noexcept {
-			start = other.start;
-			finish = other.finish;
-			end_of_storage = other.end_of_storage;
-
-			other.start = nullptr;
-			other.finish = nullptr;
-			other.end_of_storage = nullptr;
-		}
-
-		pointer start;
-		pointer finish;
-		pointer end_of_storage;
 	};
 
 	template <typename ValueType, typename SizeType, typename DifferenceType, typename Pointer, typename ConstPointer, typename Reference, typename ConstReference>
@@ -317,8 +290,8 @@ namespace Potato {
 		using const_reference = ConstReference;
 	};
 
-	struct ValueInitTag {
-		explicit ValueInitTag() = default;
+	struct ZeroInitTag {
+		explicit ZeroInitTag() = default;
 	};
 	template <typename Array>
 	struct ArrayConstIterator {
@@ -504,7 +477,42 @@ namespace Potato {
 		typename std::allocator_traits<AllocatorType>
 			::template rebind_alloc<ElementType>;
 		using M_AllocatorTraits = std::allocator_traits<M_AllocatorType>;
+		template <typename ElementTypeWrapper>
+		struct ArrayData {
+			using value_type      = typename ElementTypeWrapper::value_type;
+			using size_type       = typename ElementTypeWrapper::size_type;
+			using difference_type = typename ElementTypeWrapper::difference_type;
+			using pointer         = typename ElementTypeWrapper::pointer;
+			using const_pointer   = typename ElementTypeWrapper::const_pointer;
+			using reference       = typename ElementTypeWrapper::reference;
+			using const_reference = typename ElementTypeWrapper::const_reference;
 
+			constexpr ArrayData() noexcept
+				: start()
+				, finish()
+				, end_of_storage(){}
+
+			constexpr ArrayData(pointer start, pointer finish, pointer end) noexcept
+				: start(start)
+				, finish(finish)
+				, end_of_storage(end){}
+
+			constexpr void CopyData(ArrayData const& other) noexcept(true) {
+				start = other.start;
+				finish = other.finish;
+				end_of_storage = other.end_of_storage;
+			}
+
+			constexpr void SwapData(ArrayData& other) noexcept {
+				std::swap(start, other.start);
+				std::swap(finish, other.finish);
+				std::swap(end_of_storage, other.end_of_storage);
+			}
+
+			pointer start;
+			pointer finish;
+			pointer end_of_storage;
+		};
 	public:
 		using value_type             = ElementType;
 		using allocator_type         = AllocatorType;
@@ -545,7 +553,7 @@ namespace Potato {
 		constexpr explicit Array(const size_type count, const AllocatorType& allocator=AllocatorType())
 			: m_Data(MemoryTools::OneConstructCompressedTag{}, allocator) {
 
-			this->M_Construct(count);
+			this->M_FillZeroConstruct(count);
 		}
 		constexpr Array(size_type count, const reference value, const AllocatorType& allocator=AllocatorType()) {}
 		template <typename InputIterator>
@@ -677,6 +685,7 @@ namespace Potato {
 		[[nodiscard]] constexpr reverse_const_iterator crend() const noexcept {}
 
 	private:
+
 		template <typename Container>
 		struct [[nodiscard]] CleanGuard {
 			Container* container;
@@ -685,27 +694,29 @@ namespace Potato {
 					container->M_Clear();
 				}
 			}
+			constexpr void Release() noexcept {
+				container = nullptr;
+			}
 		};
-		struct [[nodiscard]] ConstructGuard {
+		struct [[nodiscard]] ReallocateGuard {
 			AllocatorType& allocator;
 			pointer new_start;
 			size_type new_capacity;
 			pointer constructed_start;
 			pointer constructed_finish;
-			bool is_released = false;
 
-			ConstructGuard& operator=(const ConstructGuard& other) = delete;
-			ConstructGuard(const ConstructGuard& other) = delete;
+			ReallocateGuard& operator=(const ReallocateGuard& other) = delete;
+			ReallocateGuard(const ReallocateGuard& other) = delete;
 
-			constexpr ~ConstructGuard() noexcept {
-				if (!is_released && new_start != nullptr) {
+			constexpr ~ReallocateGuard() noexcept {
+				if (new_start) {
 					MemoryTools::DestroyRange(constructed_start, constructed_finish, allocator);
 					allocator.deallocate(new_start, new_capacity);
 				}
 			}
 
-			void release() noexcept {
-				is_released = true;
+			constexpr void Release() noexcept {
+				new_start = nullptr;
 			}
 		};
 		struct [[nodiscard]] SimpleReallocateGuard {
@@ -717,9 +728,13 @@ namespace Potato {
 			SimpleReallocateGuard(const SimpleReallocateGuard& other) = delete;
 
 			constexpr ~SimpleReallocateGuard() noexcept {
-				if (new_start != nullptr) {
+				if (new_start) {
 					allocator.deallocate(new_start, new_capacity);
 				}
+			}
+
+			constexpr void Release() noexcept {
+				new_start = nullptr;
 			}
 		};
 	private:
@@ -740,7 +755,12 @@ namespace Potato {
 			finish          = mem;
 			end_of_storage  = mem + count;
 		}
-		constexpr void M_Construct (const size_type count) {
+		/**
+		 * @brief 拷贝填充构造 -> 对应构造函数 Array(n) -> 其会默认进行零初始化或者默认构造
+		 * @param count 元素个数
+		 */
+		template <typename Ty2>
+		constexpr void M_FillZeroConstruct (const size_type count, const Ty2& value) {
 			if (count == 0) return;
 
 			auto& allocator = M_GetAllocator();
@@ -749,13 +769,32 @@ namespace Potato {
 
 			this->M_AllocateUninitializedMemory(count);
 			CleanGuard Guard{ this };
-			MemoryTools::BatchOfConstruction(start, count, allocator);
+			std::uninitialized_value_construct_n(start, count);
 			Guard.container = nullptr;
 		}
 
-		template <typename ResizeType>
-		constexpr void M_Resize(const size_type new_size, const ResizeType& val) {
+		/**
+		 * @brief 拷贝填充构造 -> 对应构造函数 Array(n) -> 其会默认进行零初始化或者默认构造
+		 * @param count 元素个数
+		 * @param value 填充值
+		 */
+		template <typename Ty2>
+		constexpr void M_FillValueConstruct(const size_type count, const Ty2& value) {
+			if (count == 0) return;
+
 			auto& allocator = M_GetAllocator();
+			auto& M_Data    = this->m_Data.data;
+			pointer& start  = M_Data.start;
+
+			this->M_AllocateUninitializedMemory(count);
+			CleanGuard Guard{ this };
+			std::uninitialized_fill_n(start, count, value);
+			Guard.Release();
+		}
+
+		template <typename ResizeType>
+		constexpr void M_Resize(const size_type new_size, const ResizeType& value) {
+			auto& allocator         = M_GetAllocator();
 			auto& M_Data            = this->m_Data.data;
 			pointer& start          = M_Data.start;
 			pointer& finish         = M_Data.finish;
@@ -766,23 +805,92 @@ namespace Potato {
 			if (new_size < old_size) {
 				// 内存收缩
 				const pointer new_finish = start + new_size;
-				MemoryTools::DestroyRange(new_finish, finish, allocator);
+				std::destroy_n(new_finish, old_size - new_size);
 				finish -= new_finish;
 			} else if (new_size > old_size) {
 				// 内存扩张, 先检查容量是否足够
 				const auto old_capacity = static_cast<size_type>(end_of_storage - start);
 				if (new_size > old_capacity) {
 					// 元素不够, 重新分配内存
-					M_Reallcate(new_size, val);
+					M_Relocate(new_size, value);
+					return ;
 				}
 				// old_capacity 还够用, 则不分配内存直接使用存货
-				if constexpr (std::is_same_v<ResizeType, ValueInitTag>) {
-					(void)0;
+				auto new_strat = start + new_size;
+				auto increased_size = new_size - old_size;
+
+				if constexpr (std::is_same_v<ResizeType, ZeroInitTag>) {
+					finish = std::uninitialized_value_construct_n(new_strat, increased_size);
 				}else {
 					// 默认路径: 使用 val 进行 resize
-					//
+					finish = std::uninitialized_fill_n(new_strat, increased_size, value);
 				}
 			}
+		}
+
+		/**
+		 * @brief 重定位Array: 重新分配内存, 并搬运旧数据, 剩余部分用 value 填充
+		 * @tparam Ty2: 应该与 ElementType 兼容, 即 Ty2 可以隐式转换至 Ty2
+		 * @param new_size: 该函数默认 new_size > old_size 所以需要外部调用者保证
+		 * @param value
+		 */
+		template <typename Ty2>
+		constexpr void M_Relocate(const size_type new_size, const Ty2& value) {
+			assert(new_size < M_MaxSize() && "Array::M_Relocate(const size_type, const Ty2&) Runtime Error: Exceeding maximum size limit - 内存分配数量超过内存限制");
+
+			auto& allocator = M_GetAllocator();
+			auto& M_Data            = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
+
+			const auto old_size = static_cast<size_type>(finish - start);
+			size_type new_capacity = M_CalculateGrowth(new_size);
+
+			const pointer new_arr = allocator.allocate(new_capacity);
+			const pointer appended_start = new_arr + old_size;
+
+			ReallocateGuard Guard{
+				.allocator = allocator,
+				.new_start = new_arr,
+				.new_capacity = new_capacity,
+				.constructed_start = appended_start,
+				.constructed_finish = appended_start
+			};
+			auto& appended_finish = Guard.constructed_finish;
+			const auto& increased_size = new_size - old_size;
+			assert(increased_size>=0 && "Array::M_Relocate(const size_type, const Ty2&) Runtime Error:: new_size must be greater than old_size - M_Relocate 默认 new size >= old size");
+
+			if constexpr (std::is_same_v<Ty2, ZeroInitTag>) {
+				appended_finish = std::uninitialized_value_construct_n(appended_start, increased_size);
+			}else {
+				appended_finish = std::uninitialized_fill_n(appended_start, increased_size, value);
+			}
+
+			// 搬运旧数据: 能移动就移动, 不能移动就拷贝
+			if constexpr (std::is_nothrow_move_constructible_v<ElementType> || !std::is_copy_constructible_v<ElementType>) {
+				std::uninitialized_move_n(start, old_size, new_arr);
+			}else {
+				std::uninitialized_copy_n(start, old_size, new_arr);
+			}
+
+			this->M_UpdateData(new_arr, new_size, new_capacity);
+			Guard.Release();
+		}
+
+		constexpr void M_UpdateData(const pointer first, const size_type size, const size_type capacity) noexcept {
+			auto& allocator = M_GetAllocator();
+			auto& M_Data            = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
+
+			if (!first) {
+				this->M_Clear();
+			}
+			start = first;
+			finish = first + size;
+			end_of_storage = first + capacity;
 		}
 
 		[[nodiscard]] constexpr size_type M_CalculateGrowth(const size_type new_size) const {
@@ -831,19 +939,6 @@ namespace Potato {
 			return M_Size() == 0;
 		}
 
-
-
-		/**
-		* @brief 清除所有已从start开始, 往后count个元素, 释放调用析构函数
-		*/
-		constexpr void M_DestroyRange(pointer start, const size_type count) noexcept {
-			auto& allocator = M_GetAllocator();
-			auto& M_Data            = this->m_Data.data;
-			pointer& start_          = M_Data.start;
-			pointer& finish_         = M_Data.finish;
-			pointer& end_of_storage_ = M_Data.end_of_storage;
-		}
-
 		[[nodiscard]] constexpr const M_AllocatorType& M_GetAllocator() const noexcept {
 			return m_Data.GetFirst();
 		}
@@ -860,39 +955,13 @@ namespace Potato {
 
 
 			if (start != nullptr) {
-				MemoryTools::DestroyRange(start, finish, allocator);
+				std::destroy_n(start, finish - start);
 				allocator.deallocate(start, static_cast<size_type>(end_of_storage - start));
 
 				start = nullptr;
 				finish = nullptr;
 				end_of_storage = nullptr;
 			}
-		}
-		template <typename OtherTy>
-		constexpr void M_Reallocate(const size_type new_size, const OtherTy& val) {
-			auto& allocator = M_GetAllocator();
-			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.start;
-			pointer& finish         = M_Data.finish;
-			pointer& end_of_storage = M_Data.end_of_storage;
-
-			const auto old_size = static_cast<size_type>(finish - start);
-			size_type new_capacity = M_CalculateGrowth(new_size);
-
-			const pointer new_array_start = allocator.allocate(new_capacity);
-			const pointer new_array_appended_first = new_array_start + old_size;
-
-			// ReallocateGuard Guard{
-			// 	.allocator = allocator,
-			// 	.new_start = new_array_start,
-			// 	.new_capacity = new_capacity,
-			// 	.constructed_start = new_array_start,
-			// 	.constructed_finish = new_array_start
-			// };
-			//
-			// auto& new_array_appended_finish = Guard.constructed_finish;
-
-
 		}
 
 	private:
