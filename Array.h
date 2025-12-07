@@ -6,9 +6,9 @@
 #include <new>
 #include <vector>
 #include <compare>
+#include <memory>
 #include <type_traits>
 #include <initializer_list>
-#include <memory>
 #include <iterator>
 #include <cassert>
 namespace Potato {
@@ -32,9 +32,9 @@ namespace Potato {
 	}
 	namespace MemoryTools{
 		template <typename Container>
-		struct [[nodiscard]] TidyGuard {
+		struct [[nodiscard]] CleanGuard {
 			Container* container;
-			constexpr ~TidyGuard() {
+			constexpr ~CleanGuard() {
 				if (container) {
 					container->M_Clear();
 				}
@@ -156,6 +156,38 @@ namespace Potato {
 			}
 		}
 
+		template <typename Alloc>
+		class [[nodiscard]] ConstructBackoutGuard {
+			using pointer = AllocPointer<Alloc>;
+
+		public:
+			constexpr ConstructBackoutGuard(pointer dest, Alloc& allocator)
+				: m_dest(dest)
+				, m_src(dest)
+				, allocator(allocator){}
+
+			ConstructBackoutGuard(const ConstructBackoutGuard&)            = delete;
+			ConstructBackoutGuard& operator=(const ConstructBackoutGuard&) = delete;
+
+			constexpr ~ConstructBackoutGuard() {
+				DestroyRange(m_dest, m_src, allocator);
+			}
+
+			template <typename... Types>
+			constexpr void Append(Types&&... args) {
+				std::allocator_traits<Alloc>::construct(allocator, Unfancy(m_dest), std::forward<Types>(args)...);
+				++m_dest;
+			}
+
+			constexpr pointer Release() {
+				m_src = m_dest;
+				return m_dest;
+			}
+		private:
+			pointer m_dest;
+			pointer m_src;
+			Alloc& allocator;
+		};
 		/**
 		 * @brief 批量构造元素
 		 * @param start: 起始位置
@@ -165,23 +197,34 @@ namespace Potato {
 		template <typename Alloc>
 		constexpr AllocPointer<Alloc> BatchOfConstruction(AllocPointer<Alloc> start, AllocSize<Alloc> count, Alloc& allocator){
 			using pointer = typename Alloc::value_type*;
+			using size_type = typename std::allocator_traits<Alloc>::size_type;
 			using value_type = std::remove_pointer_t<std::remove_cv_t<pointer>>;
 			/* memset 优化 */
-			if constexpr (std::is_trivially_default_constructible_v<value_type> && std::is_trivially_copyable_v<value_type>) {
-#if defined(__cpp_lib_is_constant_evaluated) || (defined(__cpp_consteval) || (__cpp_lib_is_constant_evaluated >= 201907L))
-				if (!std::is_constant_evaluated())
-#endif
-				{
-					auto first = Unfancy(start);
-					char* const first_ = reinterpret_cast<char*>(first);
-					char* const last_ = reinterpret_cast<char*>(first_ + count);
-					std::memset(first_, 0, static_cast<std::size_t>(last_ - first_));
-					return start + count;
-				}
+			if constexpr (std::is_trivially_default_constructible_v<value_type>
+						&& std::is_trivially_copyable_v<value_type>
+						&& !std::is_constant_evaluated()) /* 常量求值的情况下不使用 memset */
+			{
+				auto first = Unfancy(start);
+				char* const first_ = reinterpret_cast<char*>(first);
+				char* const last_ = reinterpret_cast<char*>(first_ + count);
+				std::memset(first_, 0, static_cast<std::size_t>(last_ - first_));
+				return start + count;
 			}
-
-			std::uninitialized_value_construct_n(Unfancy(start), count);
-			return start + count;
+			if (std::is_constant_evaluated()) {
+				for (size_type i=0; i < count; ++i){
+					/* 在常量求值的语境下 start[i] 为空指针则编译失败 */
+					std::construct_at(std::addressof(start[i]));
+				}
+				return start + count;
+			}
+			// std::uninitialized_value_construct_n(Unfancy(start), count);
+			//
+			// return start + count;
+			ConstructBackoutGuard<Alloc> Guard{ start, allocator };
+			for (size_type i=0; i < count; ++i){
+				Guard.Append();
+			}
+			return Guard.Release();
 		}
 	};
 
@@ -196,40 +239,40 @@ namespace Potato {
 		using const_reference = typename ElementTypeWrapper::const_reference;
 
 		constexpr ArrayData() noexcept
-			: M_start()
-			, M_finish()
-			, M_End_Of_Storage(){}
+			: start()
+			, finish()
+			, end_of_storage(){}
 
 		constexpr ArrayData(pointer start, pointer finish, pointer end) noexcept
-			: M_start(start)
-			, M_finish(finish)
-			, M_End_Of_Storage(end){}
+			: start(start)
+			, finish(finish)
+			, end_of_storage(end){}
 
 		constexpr void CopyData(ArrayData const& other) noexcept(true) {
-			M_start = other.M_start;
-			M_finish = other.M_finish;
-			M_End_Of_Storage = other.M_End_Of_Storage;
+			start = other.start;
+			finish = other.finish;
+			end_of_storage = other.end_of_storage;
 		}
 
 		constexpr void SwapData(ArrayData& other) noexcept {
-			std::swap(M_start, other.M_start);
-			std::swap(M_finish, other.M_finish);
-			std::swap(M_End_Of_Storage, other.M_End_Of_Storage);
+			std::swap(start, other.start);
+			std::swap(finish, other.finish);
+			std::swap(end_of_storage, other.end_of_storage);
 		}
 
 		constexpr void StealData(ArrayData& other) noexcept {
-			M_start = other.M_start;
-			M_finish = other.M_finish;
-			M_End_Of_Storage = other.M_End_Of_Storage;
+			start = other.start;
+			finish = other.finish;
+			end_of_storage = other.end_of_storage;
 
-			other.M_start = nullptr;
-			other.M_finish = nullptr;
-			other.M_End_Of_Storage = nullptr;
+			other.start = nullptr;
+			other.finish = nullptr;
+			other.end_of_storage = nullptr;
 		}
 
-		pointer M_start;
-		pointer M_finish;
-		pointer M_End_Of_Storage;
+		pointer start;
+		pointer finish;
+		pointer end_of_storage;
 	};
 
 	template <typename ValueType, typename SizeType, typename DifferenceType, typename Pointer, typename ConstPointer, typename Reference, typename ConstReference>
@@ -294,11 +337,16 @@ namespace Potato {
 			: m_Data(MemoryTools::ZeroConstructCompressedTag{}) {}
 		constexpr explicit Array(const AllocatorType& allocator) noexcept
 			: m_Data(MemoryTools::OneConstructCompressedTag{}, allocator) {}
-		constexpr explicit Array(size_type count, const AllocatorType& allocator) {}
-		constexpr Array(size_type count, const reference value, const AllocatorType& allocator) {}
+
+		constexpr explicit Array(const size_type count, const AllocatorType& allocator=AllocatorType())
+			: m_Data(MemoryTools::OneConstructCompressedTag{}, allocator) {
+
+			this->M_Construct(count);
+		}
+		constexpr Array(size_type count, const reference value, const AllocatorType& allocator=AllocatorType()) {}
 		template <typename InputIterator>
-		constexpr Array(InputIterator first, InputIterator last, const AllocatorType& allocator) {}
-		Array(std::initializer_list<value_type> list, const AllocatorType& allocator){}
+		constexpr Array(InputIterator first, InputIterator last, const AllocatorType& allocator=AllocatorType()) {}
+		Array(std::initializer_list<value_type> list, const AllocatorType& allocator=AllocatorType()){}
 		constexpr Array(const Array& other) {}
 		constexpr Array(Array&& other) noexcept {}
 
@@ -425,21 +473,35 @@ namespace Potato {
 		[[nodiscard]] constexpr reverse_const_iterator crend() const noexcept {}
 
 	private:
-		struct [[nodiscard]] ReallocateGuard {
+		template <typename Container>
+		struct [[nodiscard]] CleanGuard {
+			Container* container;
+			constexpr ~CleanGuard() {
+				if (container) {
+					container->M_Clear();
+				}
+			}
+		};
+		struct [[nodiscard]] ConstructGuard {
 			AllocatorType& allocator;
 			pointer new_start;
 			size_type new_capacity;
 			pointer constructed_start;
 			pointer constructed_finish;
+			bool is_released = false;
 
-			ReallocateGuard& operator=(const ReallocateGuard& other) = delete;
-			ReallocateGuard(const ReallocateGuard& other) = delete;
+			ConstructGuard& operator=(const ConstructGuard& other) = delete;
+			ConstructGuard(const ConstructGuard& other) = delete;
 
-			constexpr ~ReallocateGuard() noexcept {
-				if (new_start != nullptr) {
+			constexpr ~ConstructGuard() noexcept {
+				if (!is_released && new_start != nullptr) {
 					MemoryTools::DestroyRange(constructed_start, constructed_finish, allocator);
 					allocator.deallocate(new_start, new_capacity);
 				}
+			}
+
+			void release() noexcept {
+				is_released = true;
 			}
 		};
 		struct [[nodiscard]] SimpleReallocateGuard {
@@ -457,9 +519,34 @@ namespace Potato {
 			}
 		};
 	private:
-		template <typename ... ConstructParams>
-		constexpr void M_Construct(const size_type count, ConstructParams&& ... args){
+		/**
+		* @brief 分配未初始化内存, 用于构造时申请内存
+		* @param count 分配的容量 (对象个数)
+		*/
+		constexpr void M_AllocateUninitializedMemory(size_type count){
+			auto& M_Data            = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
 
+			assert(start == nullptr && finish == nullptr && end_of_storage == nullptr && "memory must not be already allocated.");
+
+			const pointer mem = M_GetAllocator().allocate(count);
+			start           = mem;
+			finish          = mem;
+			end_of_storage  = mem + count;
+		}
+		constexpr void M_Construct (const size_type count) {
+			if (count == 0) return;
+
+			auto& allocator = M_GetAllocator();
+			auto& M_Data    = this->m_Data.data;
+			pointer& start  = M_Data.start;
+
+			this->M_AllocateUninitializedMemory(count);
+			CleanGuard Guard{ this };
+			MemoryTools::BatchOfConstruction(start, count, allocator);
+			Guard.container = nullptr;
 		}
 
 		constexpr size_type M_CalculateGrowth(const size_type new_size) const {
@@ -488,18 +575,18 @@ namespace Potato {
 
 		[[nodiscard]] constexpr size_type M_Capacity() const noexcept {
 			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.M_start;
-			pointer& finish         = M_Data.M_finish;
-			pointer& end_of_storage = M_Data.M_End_Of_Storage;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
 
 			return start ? static_cast<size_type>(end_of_storage - start) : 0u;
 		}
 
 		[[nodiscard]] constexpr size_type M_Size() const noexcept {
 			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.M_start;
-			pointer& finish         = M_Data.M_finish;
-			pointer& end_of_storage = M_Data.M_End_Of_Storage;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
 
 			return start ? static_cast<size_type>(finish - start) : 0u;
 		}
@@ -508,24 +595,7 @@ namespace Potato {
 			return M_Size() == 0;
 		}
 
-		/**
-		* @brief 分配未初始化内存, 用于构造时申请内存
-		* @param capacity 分配的容量
-		*/
-		constexpr void M_AllocateUninitializedMemory(size_type capacity){
-			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.M_start;
-			pointer& finish         = M_Data.M_finish;
-			pointer& end_of_storage = M_Data.M_End_Of_Storage;
 
-			assert(capacity != 0 && "M_AllocateNonZeroUninitializedMemory Runtime Error: capacity can not be zero.");
-			assert(start != nullptr && finish != nullptr && end_of_storage != nullptr && "M_AllocateNonZeroUninitializedMemory Runtieme Error: memory has been allocated.");
-
-			const pointer mem = M_GetAllocator().allocate(capacity);
-			start           = mem;
-			finish          = mem;
-			end_of_storage  = mem + capacity;
-		}
 
 		/**
 		* @brief 清除所有已从start开始, 往后count个元素, 释放调用析构函数
@@ -533,9 +603,9 @@ namespace Potato {
 		constexpr void M_DestroyRange(pointer start, const size_type count) noexcept {
 			auto& allocator = M_GetAllocator();
 			auto& M_Data            = this->m_Data.data;
-			pointer& start_          = M_Data.M_start;
-			pointer& finish_         = M_Data.M_finish;
-			pointer& end_of_storage_ = M_Data.M_End_Of_Storage;
+			pointer& start_          = M_Data.start;
+			pointer& finish_         = M_Data.finish;
+			pointer& end_of_storage_ = M_Data.end_of_storage;
 		}
 
 		[[nodiscard]] constexpr const M_AllocatorType& M_GetAllocator() const noexcept {
@@ -545,13 +615,30 @@ namespace Potato {
 			return m_Data.GetFirst();
 		}
 
+		constexpr void M_Clear() noexcept {
+			auto& allocator = M_GetAllocator();
+			auto& M_Data            = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
+
+
+			if (start != nullptr) {
+				MemoryTools::DestroyRange(start, finish, allocator);
+				allocator.deallocate(start, static_cast<size_type>(end_of_storage - start));
+
+				start = nullptr;
+				finish = nullptr;
+				end_of_storage = nullptr;
+			}
+		}
 		template <typename OtherTy>
 		constexpr void M_Reallocate(const size_type new_size, const OtherTy& val) {
 			auto& allocator = M_GetAllocator();
 			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.M_start;
-			pointer& finish         = M_Data.M_finish;
-			pointer& end_of_storage = M_Data.M_End_Of_Storage;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
 
 			const auto old_size = static_cast<size_type>(finish - start);
 			size_type new_capacity = M_CalculateGrowth(new_size);
@@ -559,15 +646,15 @@ namespace Potato {
 			const pointer new_array_start = allocator.allocate(new_capacity);
 			const pointer new_array_appended_first = new_array_start + old_size;
 
-			ReallocateGuard Guard{
-				.allocator = allocator,
-				.new_start = new_array_start,
-				.new_capacity = new_capacity,
-				.constructed_start = new_array_start,
-				.constructed_finish = new_array_start
-			};
-
-			auto& new_array_appended_finish = Guard.constructed_finish;
+			// ReallocateGuard Guard{
+			// 	.allocator = allocator,
+			// 	.new_start = new_array_start,
+			// 	.new_capacity = new_capacity,
+			// 	.constructed_start = new_array_start,
+			// 	.constructed_finish = new_array_start
+			// };
+			//
+			// auto& new_array_appended_finish = Guard.constructed_finish;
 
 
 		}
