@@ -317,6 +317,9 @@ namespace Potato {
 		using const_reference = ConstReference;
 	};
 
+	struct ValueInitTag {
+		explicit ValueInitTag() = default;
+	};
 	template <typename Array>
 	struct ArrayConstIterator {
 		using iterator_concept = std::contiguous_iterator_tag;
@@ -750,7 +753,39 @@ namespace Potato {
 			Guard.container = nullptr;
 		}
 
-		constexpr size_type M_CalculateGrowth(const size_type new_size) const {
+		template <typename ResizeType>
+		constexpr void M_Resize(const size_type new_size, const ResizeType& val) {
+			auto& allocator = M_GetAllocator();
+			auto& M_Data            = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
+
+			const auto old_size = static_cast<size_type>(finish - start);
+
+			if (new_size < old_size) {
+				// 内存收缩
+				const pointer new_finish = start + new_size;
+				MemoryTools::DestroyRange(new_finish, finish, allocator);
+				finish -= new_finish;
+			} else if (new_size > old_size) {
+				// 内存扩张, 先检查容量是否足够
+				const auto old_capacity = static_cast<size_type>(end_of_storage - start);
+				if (new_size > old_capacity) {
+					// 元素不够, 重新分配内存
+					M_Reallcate(new_size, val);
+				}
+				// old_capacity 还够用, 则不分配内存直接使用存货
+				if constexpr (std::is_same_v<ResizeType, ValueInitTag>) {
+					(void)0;
+				}else {
+					// 默认路径: 使用 val 进行 resize
+					//
+				}
+			}
+		}
+
+		[[nodiscard]] constexpr size_type M_CalculateGrowth(const size_type new_size) const {
 			const size_type old_capacity = this->M_Capacity();
 			const auto max_size = this->M_MaxSize();
 
