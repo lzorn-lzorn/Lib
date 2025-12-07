@@ -112,6 +112,37 @@ namespace Potato {
 			return ptr;
 		}
 
+		template <class Ptr>
+		constexpr auto UnfancyMaybeNull(Ptr ptr) noexcept {
+			// converts from a (potentially null) fancy pointer to a plain pointer
+			return ptr ? _STD addressof(*ptr) : nullptr;
+		}
+
+		template <class Ty>
+		constexpr Ty* UnfancyMaybeNull(Ty* ptr) noexcept { // do nothing for plain pointers
+			return ptr;
+		}
+
+		template <typename Ptr, std::enable_if_t<!std::is_pointer_v<Ptr>, int> = 0>
+		constexpr Ptr Refancy(typename std::pointer_traits<Ptr>::element_type* ptr) noexcept {
+			return std::pointer_traits<Ptr>::pointer_to(*ptr);
+		}
+
+		template <typename Ptr, std::enable_if_t<std::is_pointer_v<Ptr>, int> = 0>
+		constexpr Ptr Refancy(Ptr ptr) noexcept {
+			return ptr;
+		}
+
+		template <typename Ptr, std::enable_if_t<!std::is_pointer_v<Ptr>, int> = 0>
+		constexpr Ptr RefancyMaybeNull(typename std::pointer_traits<Ptr>::element_type* ptr) noexcept {
+			return ptr == nullptr ? Ptr() : std::pointer_traits<Ptr>::pointer_to(*ptr);
+		}
+
+		template <typename Ptr, std::enable_if_t<std::is_pointer_v<Ptr>, int> = 0>
+		constexpr Ptr RefancyMaybeNull(Ptr ptr) noexcept {
+			return ptr;
+		}
+
 		template <typename Alloc, typename = void>
 		struct HasMemberDestroy : std::false_type{};
 
@@ -287,10 +318,180 @@ namespace Potato {
 	};
 
 	template <typename Array>
-	struct ArrayConstIterator {};
+	struct ArrayConstIterator {
+		using iterator_concept = std::contiguous_iterator_tag;
+		using iterator_category = std::random_access_iterator_tag;
+		using value_type        = typename Array::value_type;
+		using size_type         = typename Array::size_type;
+		using difference_type   = typename Array::difference_type;
+		using pointer           = typename Array::const_pointer;
+		using reference         = const value_type&;
+
+		using M_Ptr = typename Array::pointer;
+
+		constexpr ArrayConstIterator() noexcept : ptr() {}
+		constexpr explicit ArrayConstIterator(M_Ptr ptr) noexcept : ptr(ptr) {}
+
+		[[nodiscard]] constexpr reference operator*() const noexcept {
+			return *ptr;
+		}
+		[[nodiscard]] constexpr pointer operator->() const noexcept {
+			return ptr;
+		}
+
+		[[nodiscard]] constexpr reference operator[](const difference_type index) const noexcept {
+			return *(*this + index);
+		}
+
+		/* C++20 中定义了 operator<=> 就不用定义 operator<, operator> etc 这类序关系了, 编译器可以自己推导出来 */
+		[[nodiscard]] constexpr std::strong_ordering operator<=>(const ArrayConstIterator& other) const noexcept {
+			return MemoryTools::UnfancyMaybeNull(ptr) <=> MemoryTools::UnfancyMaybeNull(other.ptr);
+		}
+
+		[[nodiscard]] constexpr bool operator==(const ArrayConstIterator& other) const noexcept {
+			return ptr == other.ptr;
+		}
+
+		[[nodiscard]] constexpr bool operator!=(const ArrayConstIterator& other) const noexcept {
+			return !(*this == other.ptr);
+		}
+
+		constexpr ArrayConstIterator& operator++() noexcept {
+			++ptr;
+			return *this;
+		}
+
+		constexpr ArrayConstIterator operator++(int) noexcept {
+			ArrayConstIterator temp = *this;
+			++*this;
+			return temp;
+		}
+
+		constexpr ArrayConstIterator& operator--() noexcept {
+			--ptr;
+			return *this;
+		}
+
+		constexpr ArrayConstIterator operator--(int) noexcept {
+			ArrayConstIterator temp = *this;
+			--*this;
+			return temp;
+		}
+
+		constexpr ArrayConstIterator& operator+=(const difference_type offset) noexcept {
+			ptr += offset;
+			return *this;
+		}
+		[[nodiscard]] constexpr ArrayConstIterator operator+(const difference_type n) const noexcept {
+			return ArrayConstIterator(ptr + n);
+		}
+		[[nodiscard]] friend constexpr ArrayConstIterator operator+(
+			const difference_type offset, ArrayConstIterator next) noexcept
+		{
+			next += offset;
+			return next;
+		}
+
+		[[nodiscard]] constexpr ArrayConstIterator operator-(const difference_type n) const noexcept {
+			return ArrayConstIterator(ptr - n);
+		}
+		[[nodiscard]] friend constexpr ArrayConstIterator operator-(
+			const difference_type offset, ArrayConstIterator next) noexcept
+		{
+			next -= offset;
+			return next;
+		}
+
+		[[nodiscard]] constexpr difference_type operator-(const ArrayConstIterator other) const noexcept {
+			return static_cast<difference_type>(ptr - other.ptr);
+		}
+
+		// [[nodiscard]] constexpr M_Ptr GetRawPointer() const noexcept {
+		// 	return MemoryTools::UnfancyMaybeNull(ptr);
+		// }
+		//
+		// constexpr void SeekTo(const value_type* raw_pointer) {
+		// 	ptr = MemoryTools::RefancyMaybeNull<M_Ptr>(const_cast<value_type*>(raw_pointer));
+		// }
+		M_Ptr ptr;
+	};
 
 	template <typename Array>
-	struct ArrayIterator : public ArrayConstIterator<Array>{};
+	struct ArrayIterator : public ArrayConstIterator<Array> {
+		using Base = ArrayConstIterator<Array>;
+		using iterator_concept = std::contiguous_iterator_tag;
+		using iterator_category = std::random_access_iterator_tag;
+		using value_type        = typename Array::value_type;
+		using difference_type    = typename Array::difference_type;
+		using pointer           = typename Array::pointer;
+		using reference         = value_type&;
+
+		using Base::Base;
+
+		[[nodiscard]] constexpr reference operator*() const noexcept {
+			return *this->ptr;
+		}
+		[[nodiscard]] constexpr pointer operator->() const noexcept {
+			return this->ptr;
+		}
+
+		[[nodiscard]] constexpr reference operator[](const difference_type index) const noexcept {
+			return *(*this + index);
+		}
+
+		constexpr ArrayIterator& operator++() noexcept {
+			Base::operator++();
+			return *this;
+		}
+
+		constexpr ArrayIterator operator++(int) noexcept {
+			ArrayIterator temp = *this;
+			Base::operator++();
+			return temp;
+		}
+
+		constexpr ArrayIterator& operator--() noexcept {
+			Base::operator--();
+			return *this;
+		}
+
+		constexpr ArrayIterator operator--(int) noexcept {
+			ArrayIterator temp = *this;
+			Base::operator--();
+			return temp;
+		}
+
+		constexpr ArrayIterator& operator+=(const difference_type offset) noexcept {
+			Base::operator+=(offset);
+			return *this;
+		}
+
+		[[nodiscard]] constexpr ArrayIterator operator+(const difference_type offset) const noexcept {
+			ArrayIterator temp = *this;
+			temp += offset;
+			return temp;
+		}
+
+		[[nodiscard]] friend constexpr ArrayIterator operator+(
+			const difference_type offset, ArrayIterator next) noexcept {
+			next += offset;
+			return next;
+		}
+
+		constexpr ArrayIterator& operator-=(const difference_type offset) noexcept {
+			Base::operator-=(offset);
+			return *this;
+		}
+
+		using Base::operator-;
+
+		[[nodiscard]] constexpr ArrayIterator operator-(const difference_type offset) const noexcept {
+			ArrayIterator temp = *this;
+			temp -= offset;
+			return temp;
+		}
+
+	};
 
 
 	template <typename ElementType, class AllocatorType=std::allocator<ElementType>>
