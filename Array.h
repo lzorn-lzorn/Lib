@@ -1,7 +1,6 @@
 #ifndef ARRAY_HPP
 #define ARRAY_HPP
 
-
 #include <memory>
 #include <new>
 #include <vector>
@@ -12,6 +11,8 @@
 #include <initializer_list>
 #include <iterator>
 #include <cassert>
+#include <optional>
+
 namespace Potato {
 	namespace TypeTools {
 		template <typename ValueType>
@@ -528,19 +529,20 @@ namespace Potato {
 
 	private:
 		using M_DateType = ArrayData<
-		std::conditional_t<TypeTools::IsSimpleAllocVal<M_AllocatorType>,
-			TypeTools::SimpleType<value_type>,
-			GenerateElementWrapper<
-				value_type,
-				size_type,
-				difference_type,
-				pointer,
-				const_pointer,
-				reference,
-				const_reference
+			std::conditional_t<
+				TypeTools::IsSimpleAllocVal<M_AllocatorType>,
+				TypeTools::SimpleType<value_type>,
+				GenerateElementWrapper<
+					value_type,
+					size_type,
+					difference_type,
+					pointer,
+					const_pointer,
+					reference,
+					const_reference
+				>
 			>
-		>
-	>;
+		>;
 
 		using M_RealValueType = MemoryTools::CompressedPair<M_AllocatorType, M_DateType>;
 	public:
@@ -614,8 +616,13 @@ namespace Potato {
 		constexpr void Assign(InputIterator first, InputIterator last) {}
 		constexpr void Assign(std::initializer_list<value_type> list) {}
 
+		// @brief: 访问数组元素访问 API 
 		[[nodiscard]] constexpr reference At(const size_type index) {}
 		[[nodiscard]] constexpr const_reference At(const size_type index) const {}
+		[[nodiscard]] constexpr reference Front(const size_type index) {}
+		[[nodiscard]] constexpr const_reference Front(const size_type index) const {}
+		[[nodiscard]] constexpr reference Back(const size_type index) {}
+		[[nodiscard]] constexpr const_reference Back(const size_type index) const {}
 
 		[[nodiscard]] constexpr size_type Find(const_reference item) const {}
 		[[nodiscard]] constexpr size_type Find(const_reference item) {}
@@ -624,13 +631,31 @@ namespace Potato {
 		template <typename Predicate>
 		[[nodiscard]] constexpr size_type FindIf(Predicate pred) {}
 
+		/**
+		 * @brief: 函数式API, 它们都不会修改原有数组的值, 而是返回一个新的数组或者值
+		 * 		- Filter: 会返回一个新的数组, 该数组包含所有满足谓词条件的元素.
+		 *      - Transform 会返回一个新的数组, 内部元素均应用 FnTransform
+		 *      - Count 会计算满足条件的元素数量并返回该数量.
+		 *      - IsContain  会检查数组中是否包含满足条件的元素并返回布尔值.
+		 *      - Sort 会返回一个新的数组, 该数组包含排序后的元素.
+		 */
 		template <typename Predicate>
 		[[nodiscard]] constexpr Array Filter(Predicate pred) const {}
 		template <typename Predicate>
 		[[nodiscard]] constexpr Array Filter(Predicate pred) {}
+		template <typename FnTransform>
+		[[nodiscard]] constexpr Array<std::invoke_result_t<FnTransform, value_type>> Transform(FnTransform func) const {}
+		template <typename FnTransform>
+		[[nodiscard]] constexpr Array<std::invoke_result_t<FnTransform, value_type>> Transform(FnTransform func) {}
 
 		[[nodiscard]] constexpr size_type Count(const_reference item) const {
-			return m_Data.finish - m_Data.start;
+			size_type count = 0;
+			for (const auto& element : *this) {
+				if (element == item) {
+					++count;
+				}
+			}
+			return count;
 		}
 
 		template <typename Predicate>
@@ -639,41 +664,149 @@ namespace Potato {
 		[[nodiscard]] constexpr bool IsContain(const_reference item) const { return true; }
 		template <typename Predicate>
 		[[nodiscard]] constexpr bool IsContain(Predicate pred) const { return true; }
+		template <typename Compare>
+		[[nodiscard]] constexpr Array Sort(Compare comp) { }
 
-		[[nodiscard]] constexpr reference Front(const size_type index) {}
-		[[nodiscard]] constexpr const_reference Front(const size_type index) const {}
+		template <typename Ty2>
+		int IsContinuousSubSequence(const Array<Ty2>& sub) const noexcept;
+		template <typename Ty2>
+		bool IsSequence(const Array<Ty2>& sub) const noexcept;
 
-		[[nodiscard]] constexpr reference Back(const size_type index) {}
-		[[nodiscard]] constexpr const_reference Back(const size_type index) const {}
+		template <typename Ty2>
+		Array Intersection(const Array<Ty2>& other) const noexcept;
+		template <typename Ty2>
+		Array Union(const Array<Ty2>& other) const noexcept;
+		template <typename Ty2>
+		Array Difference(const Array<Ty2>& other) const noexcept;
 
-		constexpr iterator Insert(const_iterator position, value_type& value) {}
-		constexpr iterator Insert(const_iterator position, const value_type& value) {}
-		constexpr iterator Insert(const_iterator position, size_type count, const value_type& value) {}
+		constexpr iterator Insert(const_iterator position, const value_type& value) {
+			pointer ptr = M_InsertHole(position, 1, false);
+			std::allocator_traits<AllocatorType>::construct(M_GetAllocator(), ptr, value);
+			return iterator(ptr);
+		}
+		constexpr iterator Insert(const_iterator position, value_type&& value) {
+			pointer ptr = M_InsertHole(position, 1, false);
+			std::allocator_traits<AllocatorType>::construct(M_GetAllocator(), ptr, std::move(value));
+			return iterator(ptr);
+		}
+		constexpr iterator Insert(const_iterator position, size_type count, const value_type& value) {
+			pointer ptr = M_InsertHole(position, count, false);
+			std::uninitialized_fill_n(ptr, count, value);
+			return iterator(ptr);
+		}
 		template <typename InputIterator>
-		constexpr iterator Insert(const_iterator position, InputIterator first, InputIterator last) {}
-		constexpr iterator Insert(const_iterator position, std::initializer_list<value_type> list) {}
+		constexpr iterator Insert(const_iterator position, InputIterator first, InputIterator last) {
+			if constexpr (std::is_base_of_v<std::forward_iterator_tag, typename std::iterator_traits<InputIterator>::iterator_category>) {
+				const auto count = static_cast<size_type>(std::distance(first, last));
+				pointer ptr = M_InsertHole(position, count, false);
+				std::uninitialized_copy(first, last, ptr);
+				return iterator(ptr);
+			} else {
+				// InputIterator cannot calculate count, so we can't use M_InsertHole easily without buffering or repeated inserts
+				// Repeated inserts is the standard way for InputIterator
+				difference_type offset = position - cbegin();
+				for (; first != last; ++first) {
+					position = Insert(begin() + offset, *first);
+					offset++;
+					position++; // Point to next slot
+				}
+				return begin() + offset; 
+			}
+		}
+		constexpr iterator Insert(const_iterator position, std::initializer_list<value_type> list) {
+			return Insert(position, list.begin(), list.end());
+		}
 
-		constexpr iterator InsertAt(size_type index, value_type& value) {}
-		constexpr iterator InsertAt(size_type index, const value_type& value) {}
-		constexpr iterator InsertAt(size_type index, size_type count, const value_type& value) {}
+		constexpr iterator InsertAt(size_type index, value_type& value) {
+			return Insert(begin() + index, value);
+		}
+		constexpr iterator InsertAt(size_type index, const value_type& value) {
+			return Insert(begin() + index, value);
+		}
+		constexpr iterator InsertAt(size_type index, size_type count, const value_type& value) {
+			return Insert(begin() + index, count, value);
+		}
+
+		constexpr void InsertUninitializedItem(const_iterator position) {
+			M_InsertHole(position, 1, false);
+		}
+		constexpr void InsertUninitializedItem(const_iterator position, const size_type count) {
+			M_InsertHole(position, count, false);
+		}
+		constexpr reference InsertZeroedItem(const_iterator position) {
+			return *M_InsertHole(position, 1, true);
+		}
+		constexpr reference InsertZeroedItem(const_iterator position, const size_type count) {
+			return *M_InsertHole(position, count, true);
+		}
 
 		constexpr iterator InsertUnique(size_type index, value_type& value) {}
 		constexpr iterator InsertUnique(size_type index, const value_type& value) {}
 
+		/**
+		 * @brief: Append系列API: 追加元素到数组末尾, 返回数组本身的引用, 支持链式调用
+		 *  - 可以追加单个元素:
+		 *   	- 以元素的形式追加: Append(const value_type& value)
+		 *   	- 以右值的形式追加: Append(value_type&& value)
+		 *      - 以参数包的形式追加: Append(Args&& ... args)
+		 *	- 可以追加另一个数组的所有元素:
+		 *      - 以右值的形式追加: Append(Array&& array)
+		 *      - 以指针和数量的形式追加: Append(const_pointer ptr, size_type count)
+		 *      - 以迭代器的形式追加: Append(InputIterator first, InputIterator last)
+		 *      
+		 */
+		constexpr Array& Append(value_type&& value) {
+			M_EmplaceBack(std::move(value));
+			return *this;
+		}
+		constexpr Array& Append(const value_type& value) {
+			M_EmplaceBack(value);
+			return *this;
+		}
+		constexpr Array& Append(Array&& array) {
+			if (this == &array || array.IsEmpty()) {
+				return *this;
+			}
+			/* https://en.cppreference.com/w/cpp/iterator/move_iterator.html */
+			M_AppendRange(std::make_move_iterator(array.begin()), array.M_Size());
+			array.M_Clear();
+			return *this;
+		}
+		constexpr Array& Append(const_pointer ptr, size_type count) {
+			if (count == 0 || ptr == nullptr) {
+				return *this;
+			}
+			M_AppendRange(ptr, count);
+			return *this;
+		}
 
-		constexpr void Append(Array&& array) {}
-		constexpr void Append(pointer ptr, size_type count) {}
 
-		constexpr void InsertUninitializedItem(const_iterator position) {}
-		constexpr void InsertUninitializedItem(const_iterator position, const size_type count) {}
-		constexpr reference InsertZeroedItem(const_iterator position) {}
-		constexpr reference InsertZeroedItem(const_iterator position, const size_type count) {}
+		/**
+		 * @note: Cpp 标准中, InputIterator 是单向迭代器不能使用 std::distance 计算距离
+		 *     只有 ForwardIterator 及以上的迭代器才能使用 std::distance 计算距离.
+		 *     
+		 *		https://en.cppreference.com/w/cpp/header/iterator.html
+		 *		https://en.cppreference.com/w/cpp/named_req/Iterator.html
+		 */
+		template <typename InputIterator>
+			requires (!std::is_integral_v<InputIterator>)
+		constexpr Array& Append(InputIterator first, InputIterator last) {
+			if constexpr (std::is_base_of_v<std::forward_iterator_tag, typename std::iterator_traits<InputIterator>::iterator_category>) {
+				const auto count = static_cast<size_type>(std::distance(first, last));
+				M_AppendRange(first, count);
+			} else {
+				for (; first != last; ++first) {
+					M_EmplaceBack(*first);
+				}
+			}
+			return *this;
+		}
 
-		constexpr iterator Erase(const_iterator position){}
-		constexpr iterator Erase(const_iterator first, const_iterator last){}
-		constexpr iterator EraseAt(const size_type index){}
-		template <typename Predicate>
-		constexpr iterator EraseIf(Predicate pred){}
+		template <typename ...Args>
+		constexpr Array& Append(Args&& ... args) {
+			M_EmplaceBack(std::forward<Args>(args)...);
+			return *this;
+		}
 
 		template <typename ... Args>
 		constexpr iterator Emplace(const_iterator position, Args&& ... args) {}
@@ -682,6 +815,16 @@ namespace Potato {
 
 		template <typename ... Args>
 		constexpr reference EmplaceBack(Args&& ... args) {}
+
+		constexpr iterator Erase(const_iterator position){}
+		constexpr iterator Erase(const_iterator first, const_iterator last){}
+		constexpr iterator EraseAt(const size_type index){}
+		constexpr std::shared_ptr<value_type> EraseAsShared(const size_type index){}
+		constexpr std::unique_ptr<value_type> EraseAsUnique(const size_type index){}
+		constexpr std::optional<value_type> EraseAsOptional(const size_type index){}
+		template <typename Predicate>
+		constexpr iterator EraseIf(Predicate pred){}
+
 
 		/** 
 		 * @brief: 栈语义的API: Push / Pop / Top ========================== 
@@ -748,12 +891,17 @@ namespace Potato {
 		constexpr void Resize(size_type count, const value_type& value) {}
 		constexpr void Reserve(size_type capacity) {}
 		constexpr void Swap() noexcept {}
-
+		
+	
 		bool IsEmpty() const noexcept {
 			return M_Size() == 0;
 		}
-		size_type Size() const noexcept {}
-		size_type Capacity() const noexcept {}
+		size_type Size() const noexcept {
+			return M_Size();
+		}
+		size_type Capacity() const noexcept {
+			return M_Capacity();
+		}
 		size_type Slack() const noexcept {}
 
 		void Shrink() noexcept {}
@@ -768,7 +916,6 @@ namespace Potato {
 		[[nodiscard]] constexpr const_iterator cbegin() const noexcept {
 			return const_iterator(m_Data.data.start);
 		}
-
 		[[nodiscard]] constexpr iterator end() noexcept {
 			return iterator(m_Data.data.finish);
 		}
@@ -778,7 +925,6 @@ namespace Potato {
 		[[nodiscard]] constexpr const_iterator cend() const noexcept {
 			return const_iterator(m_Data.data.finish);
 		}
-
 		[[nodiscard]] constexpr reverse_iterator rbegin() noexcept {
 			return reverse_iterator(end());
 		}
@@ -788,7 +934,6 @@ namespace Potato {
 		[[nodiscard]] constexpr reverse_const_iterator crbegin() const noexcept {
 			return reverse_const_iterator(cend());
 		}
-
 		[[nodiscard]] constexpr reverse_iterator rend() noexcept {
 			return reverse_iterator(begin());
 		}
@@ -1149,68 +1294,29 @@ namespace Potato {
 		template <typename ... Args>
 		constexpr iterator M_Emplace(const_iterator position, Args&& ...args){
 			auto&    M_Data         = this->m_Data.data;
-			pointer& start          = M_Data.start;
 			pointer& finish         = M_Data.finish;
-			pointer& end_of_storage = M_Data.end_of_storage;
 
 			const auto offset = static_cast<difference_type>(position - cbegin());
-			pointer insert_pos_ptr = start + offset;
 			
-			assert(insert_pos_ptr >= start && insert_pos_ptr <= finish && "Array::M_Emplace(const_iterator, Args&& ...args) Runtime Error: position iterator out of range - 插入位置迭代器越界");
-
-			// Case1: 还有多余空间, 也是最常见的情况
-			if (finish != end_of_storage) [[likely]] {
-				// Case1.1: 直接在末尾插入元素, 无需搬运数据, 直接就地构造
-				if (insert_pos_ptr == finish) {
-					std::allocator_traits<AllocatorType>::construct(
-						M_GetAllocator(),
-						std::addressof(*finish),
-						std::forward<Args>(args)...
-					);
-					++finish;
-				}
-
-				// Case1.2: 需要搬运数据
-				else {
-				/**
-				 *   @note: 这里构造 temp 是自引用安全性 
-				 *   		args 可能是容器内部元素的引用 (Aliasing)
-				 *   	    这意味着我们不能先移动数据覆盖旧值, 再用旧引用去构造, 
-				 *   	    必须先构造一个临时对象保存值
-				 *   @example: 
-				 *   		Array<string> arr = {'a', 'b', 'c'};
-				 *       	arr.Emplace(arr.begin(), arr[1]); 
-				 *  
-				 *   如果此时没有先构造临时对象, 在移动完数据之后 arr[1] 就已经被
-				 *   掏空的状态(moved-from), 导致插入的不是 'b' 而是一个空字符串
-				 *  
-				 *   - 对于拷贝构造 (左值引用): 它创建了一份副本. 即使原数据在搬运
-				 *   过程中被覆盖或移动，副本依然有效
-				 *   - 对于移动构造 (右值引用): 虽然右值引用通常不涉及自引用(即将销毁)
-				 *   但为了逻辑统一和安全，先具象化(Materialize)这个对象，再进行内部
-				 *   内存的洗牌
-				 */
-				 *  
-					value_type temp(std::forward<Args>(args)...);
-
-					std::allocator_traits<AllocatorType>::construct(
-						M_GetAllocator(),
-						std::addressof(*(finish)),
-						std::move(*(finish - 1))
-					);
-					++finish;
-
-					// 将 [pos, finish-2] 整体向后移动一步到 [pos+1, finish-1]
-					// finish 已经自增过了，原最后一个元素位于 finish-2
-					std::move_backward(insert_pos_ptr, finish - 2, finish - 1);
-
-					*insert_pos_ptr = std::move(temp);
-				}
+			// Quick path for push_back
+			if (offset == M_Size()) {
+				M_EmplaceBack(std::forward<Args>(args)...);
+				return begin() + offset;
 			}
-			// Case2: 没有多余空间, 需要重新分配内存(扩容)
-			else {
-				M_RellocateAndEmplace(insert_pos_ptr, std::forward<Args>(args)...);
-			}
+
+			// 1. Materialize temporary to handle aliasing
+			value_type temp(std::forward<Args>(args)...);
+
+			// 2. Open a hole
+			pointer insert_pos_ptr = M_InsertHole(position, 1, false);
+
+			// 3. Move Construct
+			std::allocator_traits<AllocatorType>::construct(
+				M_GetAllocator(),
+				insert_pos_ptr,
+				std::move(temp)
+			);
+			
 			return begin() + offset;
 		}
 
@@ -1227,83 +1333,291 @@ namespace Potato {
 		 *			  new_insert_pos_ptr	 	
 		 *
 		 */
+		
+		/**
+		 * @brief 内部通用的 EmplaceBack 方法, 其是一个通用的追加器, 
+		 * @       可以同时用于 Copy 和 Move 的场景  
+		 *       其核心操作:
+		 *            std::allocator_traits<AllocatorType>::construct(
+		 *            	alloc, 
+		 *            	ptr, 
+		 *            	std::forward<Args>(args)...
+		 *            );
+		 *      等价于 new (ptr) T(std::forward<Args>(args)...);
+		 *       1. 传入一个已经存在的对象: const value_type& obj -> 拷贝构造
+		 *       2. 传入一个将要被销毁的对象: value_type&& obj -> 移动构造
+		 *  	 3. 传入构造参数列表: Args&& ...args -> 完美转发构造
+		 * @param ...args: 构造参数
+		 * @return: 返回新插入元素的引用
+		 */
 		template <typename ... Args>
-		constexpr void M_RellocateAndEmplace(pointer insert_pos_ptr, Args&& ...args){
-			auto&	allocator      = M_GetAllocator();
-			auto&   M_Data         = this->m_Data.data;
-			
-			// step1: 计算新容量
-			const size_type old_size = M_Size();
-			const size_type new_capacity = M_CalculateGrowth(old_size + 1);
+		constexpr reference M_EmplaceBack(Args&& ... args) {
+			auto& allocator = M_GetAllocator();
+			auto& M_Data    = this->m_Data.data;
 
-			pointer new_start = allocator.allocate(new_capacity);
-			pointer new_finish = new_start;
-
-			const difference_type insert_offset = insert_pos_ptr - M_Data.start;
-			pointer new_insert_pos_ptr = new_start + insert_offset;
-
-			// step2: 创建新元素
-			try {
-				// 强异常保证
+			if (M_Data.finish != M_Data.end_of_storage) [[likely]] {
 				std::allocator_traits<AllocatorType>::construct(
 					allocator,
-					std::addressof(*new_insert_pos_ptr),
+					M_Data.finish,
 					std::forward<Args>(args)...
 				);
-			} catch (...) {
-				allocator.deallocate(new_start, new_capacity);
+				return *M_Data.finish++;
+			} else {
+				// Realloc path: must materialize to avoid aliasing issues during realloc
+				value_type temp(std::forward<Args>(args)...);
+				// M_InsertHole at end() simply reallocates and moves old elements
+				pointer ptr = M_InsertHole(cend(), 1, false);
+				std::allocator_traits<AllocatorType>::construct(
+					allocator,
+					ptr,
+					std::move(temp)
+				);
+				return *ptr;
+			}
+		}
+
+		template <typename InputIterator>
+		constexpr void M_AppendRange(InputIterator first, size_type count) {
+			if (count == 0) return;
+			auto& M_Data = this->m_Data.data;
+
+			if (static_cast<size_type>(M_Data.end_of_storage - M_Data.finish) >= count) {
+				M_Data.finish = std::uninitialized_copy_n(first, count, M_Data.finish);
+			} else {
+				M_ReallocateAndInsertHole(M_Data.finish, count, [&](pointer ptr, size_type n) {
+					return std::uninitialized_copy_n(first, n, ptr);
+				});
+			}
+		}
+
+		/**
+		 * @brief 在指定位置创建一个 "洞" (Gap), 用于后续填充.
+		 * @param position 插入位置
+		 * @param count 洞的数量
+		 * @param fill_zero 是否对洞进行零初始化 (Value Initialization)
+		 * @return 返回洞的起始位置指针
+		 */
+		pointer M_InsertHole(const_iterator position, size_type count, bool fill_zero) {
+			auto&    allocator      = M_GetAllocator();
+			auto&    M_Data         = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
+
+			const auto offset = static_cast<difference_type>(position - cbegin());
+			pointer insert_pos_ptr = start + offset;
+
+			if (count == 0) return insert_pos_ptr;
+
+			if (static_cast<size_type>(end_of_storage - finish) >= count) {
+				// Fast Path: 如果是在末尾插入，且空间足够，直接移动 finish 指针即可
+				if (insert_pos_ptr == finish) {
+					finish += count;
+					if (fill_zero) {
+						std::uninitialized_value_construct_n(insert_pos_ptr, count);
+					}
+					return insert_pos_ptr;
+				}
+
+				const size_type elems_after = finish - insert_pos_ptr;
+				pointer old_finish = finish;
+				finish += count;
+
+				// 策略: 先移动尾部数据到未初始化区域, 再移动剩余部分
+				if (elems_after > count) {
+					std::uninitialized_move(old_finish - count, old_finish, old_finish);
+					std::move_backward(insert_pos_ptr, old_finish - count, old_finish);
+				} else {
+					std::uninitialized_move(insert_pos_ptr, old_finish, insert_pos_ptr + count);
+				}
+
+				if (fill_zero) {
+					std::uninitialized_value_construct_n(insert_pos_ptr, count);
+				}
+
+				return insert_pos_ptr;
+			} else {
+				return M_ReallocateAndInsertHole(insert_pos_ptr, count, [&](pointer ptr, size_type n) {
+					if (fill_zero) {
+						return std::uninitialized_value_construct_n(ptr, n);
+					}
+					return ptr + n;
+				});
+			}
+		}
+
+		/**
+		 * @brief 核心扩容辅助函数: 重新分配内存并在指定位置插入"空洞" or "数据"
+		 * 
+		 * 此函数实现了 "Allocate-Move-Construct-Move-Deallocate" 的标准扩容流程，
+		 * 并通过回调函数 (Callback) 泛化了中间那个 "Hole" 的处理逻辑。
+		 * 
+		 * 流程分为三步:
+		 * 1. [Begin, Pos) -> 移动/拷贝到新内存头部
+		 * 2. [Hole]       -> 调用 gap_op 在中间位置构造/跳过
+		 * 3. [Pos, End)   -> 移动/拷贝到新内存尾部
+		 * 
+		 * @tparam GapOp: 回调函数类型, 签名应为 (pointer dest, size_type count) -> pointer (返回新的 finish)
+		 *                - 用于 InsertHole: 可能进行 default construct 或 leave uninitialized
+		 *                - 用于 AppendRange: 进行 range copy
+		 * @param pos:   旧内存中的插入点
+		 * @param count: 插入元素的数量 (Hole的大小)
+		 * @param gap_op: 填充中间区域的回调逻辑
+		 * 
+		 * @return pointer: 返回新内存中 "Hole" 的起始位置
+		 * 
+		 * @note 异常安全性: Strong Guarantee
+		 *       - 如果新内存分配失败，抛出异常，原 Array 不变。
+		 *       - 如果 gap_op 或数据搬运抛出异常，会自动析构新内存中已构造的对象并释放内存，
+		 *         原 Array 保持不变 (假设 move constructor 不抛异常)。
+		 */
+		template <typename GapOp>
+		pointer M_ReallocateAndInsertHole(pointer pos, size_type count, GapOp&& gap_op) {
+			auto& allocator = M_GetAllocator();
+			auto& M_Data    = this->m_Data.data;
+
+			const size_type old_size = M_Size();
+			const size_type new_capacity = M_CalculateGrowth(old_size + count);
+			
+			pointer new_start = allocator.allocate(new_capacity);
+			pointer new_finish = new_start;
+			
+			const difference_type offset = pos - M_Data.start;
+			pointer new_insert_pos = new_start + offset;
+
+			SimpleReallocateGuard Guard{allocator, new_start, new_capacity};
+
+			// step1. Move elements before pos
+			// 异常安全: 如果这里抛出异常, SimpleReallocateGuard 会释放内存, 无需 destroy
+			if (pos != M_Data.start) {
+				if constexpr (std::is_nothrow_move_constructible_v<value_type> || !std::is_copy_constructible_v<value_type>) {
+					new_finish = std::uninitialized_move(M_Data.start, pos, new_start);
+				} else {
+					new_finish = std::uninitialized_copy(M_Data.start, pos, new_start);
+				}
+			}
+
+			// step2. Handle Gap via Callback
+			try {
+				new_finish = gap_op(new_finish, count);
+			} catch(...) {
+				std::destroy(new_start, new_finish); // Clean First Part
 				throw;
 			}
 
-			// step3: 搬运旧数据
+			// step3. Move elements after pos
 			try {
-				// 搬运前半部分
-				new_finish = std::uninitialized_move(
-					M_Data.start,
-					insert_pos_ptr,
-					new_start
-				);
-
-				// 跳过刚刚插入之后的数据
-				++new_finish; 
-
-				// 搬运后半部分
-				new_finish = std::uninitialized_move(
-					insert_pos_ptr,
-					M_Data.finish,
-					new_finish
-				);
+				if constexpr (std::is_nothrow_move_constructible_v<value_type> || !std::is_copy_constructible_v<value_type>) {
+					std::uninitialized_move(pos, M_Data.finish, new_finish);
+				} else {
+					std::uninitialized_copy(pos, M_Data.finish, new_finish);
+				}
+				new_finish += (M_Data.finish - pos);
 			} catch (...) {
-				/**
-			     * - 如果搬运过程中抛出异常，销毁新内存中已经构造好的所有对象, 此时 
-			     *   new_finish 指向最后尝试构造的位置，或者刚构造完的位置. 
-			     * - 如果是 construct(new_pos) 之后的 uninitialized_move 抛出, 则
-			     *   需要销毁 new_pos 处的对象
-			     * - 如果是在前半段搬运途中失败，new_finish 指向搬運到的位置 destroy 
-			     *   会销毁它们. 同时也需要销毁那个单独构造的 new_pos_ptr 处的元素
-			     */
-                std::destroy(new_start, new_finish); 
-                if (new_finish <= new_pos_ptr) {
-                    // 意味着异常发生在前半段或者刚好 construct 完
-                    std::allocator_traits<AllocatorType>::destroy(allocator, new_pos_ptr);
-                }
-                allocator.deallocate(new_start, new_capacity);
-                throw;
+				// uninitialized_move/copy 自身保证了若抛出异常会析构它构造的部分
+				// 我们需要析构之前已经构造好的部分 (First Part + Gap)
+				// 注意: new_finish 在 gap_op 之后已经指向 gap 之后的位置
+				std::destroy(new_start, new_finish); 
+				throw;
 			}
 
-			// step4: 释放旧内存
 			std::destroy(M_Data.start, M_Data.finish);
 			allocator.deallocate(M_Data.start, static_cast<size_type>(M_Data.end_of_storage - M_Data.start));
 
-			// step5: 更新数据指针
 			M_Data.start          = new_start;
 			M_Data.finish         = new_finish;
 			M_Data.end_of_storage = new_start + new_capacity;
-		} 
+			Guard.Release();
+			return new_insert_pos; 
+		}
+
 	private:
 		M_RealValueType m_Data;
 	};
+
 }
 
-// #endif // _cplusplus > 202002L
+/**
+ * @brief: 多数组交集运算
+ * @return: 输出 Array 的类型是所有 Array::value_type 的 intersection type
+ */
+template <typename ... Arrays>
+Array Intersection(const Arrays& ... arrays){
+
+}
+
+/**
+ * @brief: 多数组并集运算
+ * @return: 输出 Array 的类型是所有 Array::value_type 的 intersection type
+ */
+template <typename ... Arrays>
+Array Union (const Arrays& ... arrays){
+
+}
+
+/**
+ * @brief: array1 - array2 差集运算
+ * @return: 输出 Array 的类型是 Ty1 和 Ty2 的 difference type
+ *    如果不存在 common type, 则返回空 Array
+ */
+template <typename Ty1, typename Ty2>
+Array Difference(const Arrays& array1, const Arrays& array2){
+
+}
+
+/**
+ * @brief: 判断 sub 数组是否为 origin 数组的子序列
+ * @tparam Ty1: origin 数组的元素类型
+ * @tparam Ty2: sub 数组的元素类型
+ * @note: Ty1 Ty2 必须存在公共类型, 且元素支持 operator==
+ * @note: 这里的子序列并不要求是连续的, 只要保持相对顺序即可
+ */
+template <typename Ty1, typename Ty2>
+	requires std::is_convertible_v<Ty2, Ty1>
+bool IsSubSequence(const Array<Ty1>& origin, const Array<Ty2>& sub)
+
+
+/**
+ * @brief: 判断 sub 数组是否为 origin 数组的子序列
+ * @tparam Ty1: origin 数组的元素类型
+ * @tparam Ty2: sub 数组的元素类型
+ * @return: 如果 sub 是 origin 的连续子序列, 则返回子序列的起始索引, 否则返回 -1
+ * @note: Ty1 Ty2 必须存在公共类型, 且元素支持 operator==
+ */
+template <typename Ty1, typename Ty2>
+	requires std::is_convertible_v<Ty2, Ty1>
+int IsContinuousSubSequence(const Array<Ty1>& origin, const Array<Ty2>& sub);
+
+bool operator==(const Array& lhs, const Array& rhs) noexcept {
+
+}
+bool operator!=(const Array& lhs, const Array& rhs) noexcept {
+
+}
+bool operator<=>(const Array& lhs, const Array& rhs) noexcept {
+
+}
+
+/**
+ * @brief: 循环访问器, 用于循环访问数组中的元素
+ */
+struct Walker {
+	/**
+	* @brief: 循环访问元素 API: Next / Back 
+	* @bote: 从第一次开始使用Next()/Back()开始, 会依次返回数组中的每一个元素,
+	*     当访问到数组末尾时, 会从头开始继续访问, 形成一个循环访问的效果.
+	*/
+	[[nodiscard]] value_type Next() noexcept {}
+	[[nodiscard]] value_type Back() noexcept {}
+	[[nodiscard]] void SetCursor(int index) noexcept {}
+	template <typename InputIterator>
+	[[nodiscard]] void SetCursor(InputIterator position) noexcept {}
+
+private:
+	int m_Footprint {0};
+	Array<ElementType>* m_World;
+};
+	
+
+
 #endif // ARRAY_HPP
