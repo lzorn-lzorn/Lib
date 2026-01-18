@@ -1,12 +1,13 @@
 #ifndef ARRAY_HPP
 #define ARRAY_HPP
-// #if __cplusplus >= 202002L
+
 
 #include <memory>
 #include <new>
 #include <vector>
 #include <compare>
 #include <memory>
+#include <print>
 #include <type_traits>
 #include <initializer_list>
 #include <iterator>
@@ -267,7 +268,6 @@ namespace Potato {
 		 */
 		template <typename Alloc>
 		constexpr AllocPointer<Alloc> BatchOfFillConstruction(AllocPointer<Alloc> start, AllocSize<Alloc> count, const typename Alloc::value_type& value, Alloc& allocator){
-			using Ty = typename Alloc::value_type;
 			// memset 路径: 对于标量类型且非 volatile 类型可以使用 memset 优化
 
 			ConstructBackoutGuard<Alloc> Guard{ start, allocator };
@@ -295,13 +295,17 @@ namespace Potato {
 	};
 	template <typename Array>
 	struct ArrayConstIterator {
-		using iterator_concept = std::contiguous_iterator_tag;
+		using iterator_concept  = std::contiguous_iterator_tag;
 		using iterator_category = std::random_access_iterator_tag;
 		using value_type        = typename Array::value_type;
 		using size_type         = typename Array::size_type;
 		using difference_type   = typename Array::difference_type;
 		using pointer           = typename Array::const_pointer;
 		using reference         = const value_type&;
+
+		template <typename> friend struct ArrayIterator;
+		template <typename> friend struct ArrayConstIterator;
+		
 
 		using M_Ptr = typename Array::pointer;
 
@@ -310,6 +314,9 @@ namespace Potato {
 
 		[[nodiscard]] constexpr reference operator*() const noexcept {
 			return *ptr;
+		}
+		[[nodiscard]] constexpr pointer operator->() const noexcept {
+			return ptr;
 		}
 		[[nodiscard]] constexpr pointer operator->() const noexcept {
 			return ptr;
@@ -324,12 +331,9 @@ namespace Potato {
 			return MemoryTools::UnfancyMaybeNull(ptr) <=> MemoryTools::UnfancyMaybeNull(other.ptr);
 		}
 
+		/* operator!= 可以被编译器通过 operator== 自动生成 */
 		[[nodiscard]] constexpr bool operator==(const ArrayConstIterator& other) const noexcept {
 			return ptr == other.ptr;
-		}
-
-		[[nodiscard]] constexpr bool operator!=(const ArrayConstIterator& other) const noexcept {
-			return !(*this == other.ptr);
 		}
 
 		constexpr ArrayConstIterator& operator++() noexcept {
@@ -370,12 +374,6 @@ namespace Potato {
 
 		[[nodiscard]] constexpr ArrayConstIterator operator-(const difference_type n) const noexcept {
 			return ArrayConstIterator(ptr - n);
-		}
-		[[nodiscard]] friend constexpr ArrayConstIterator operator-(
-			const difference_type offset, ArrayConstIterator next) noexcept
-		{
-			next -= offset;
-			return next;
 		}
 
 		[[nodiscard]] constexpr difference_type operator-(const ArrayConstIterator other) const noexcept {
@@ -467,6 +465,7 @@ namespace Potato {
 			return temp;
 		}
 
+		using Base::operator-;
 	};
 
 
@@ -509,9 +508,9 @@ namespace Potato {
 				std::swap(end_of_storage, other.end_of_storage);
 			}
 
-			pointer start;
-			pointer finish;
-			pointer end_of_storage;
+			pointer start { nullptr };           // 指向已分配内存起始位置
+			pointer finish { nullptr };          // 指向已构造元素的末尾
+			pointer end_of_storage { nullptr };  // 指向分配内存的末尾
 		};
 	public:
 		using value_type             = ElementType;
@@ -547,18 +546,51 @@ namespace Potato {
 	public:
 		constexpr explicit Array() noexcept
 			: m_Data(MemoryTools::ZeroConstructCompressedTag{}) {}
-		constexpr explicit Array(const AllocatorType& allocator) noexcept
+
+		/**
+		 * @note: std::allocate 时默认 noexcept 的, 但是标准没有要求自定义的 allocator
+		 *    也必须时 noexcept 的, 所以这里不加 noexcept 关键字. 
+		 *    如果 noexcept 的函数抛出异常则直接调用 std::terminate 终止程序. 
+		 *
+		 *    https://en.cppreference.com/w/cpp/language/noexcept_spec.html
+		 *
+		 */
+		constexpr explicit Array(const AllocatorType& allocator)
+			noexcept (std::is_nothrow_copy_constructible_v<AllocatorType>)
 			: m_Data(MemoryTools::OneConstructCompressedTag{}, allocator) {}
 
 		constexpr explicit Array(const size_type count, const AllocatorType& allocator=AllocatorType())
+			noexcept (std::is_nothrow_copy_constructible_v<AllocatorType>)
+			: m_Data(MemoryTools::OneConstructCompressedTag{}, allocator) {
+			if (count > M_MaxSize()) [[unlikely]] {
+				throw std::length_error("Array size exceeds maximum limit.");
+			}
+			M_FillZeroConstruct(count);
+		}
+		constexpr Array(size_type count, const_reference value, const AllocatorType& allocator=AllocatorType())
+			noexcept (std::is_nothrow_copy_constructible_v<AllocatorType>) 
+			: m_Data(MemoryTools::OneConstructCompressedTag{}, allocator) {
+			if (count > M_MaxSize()) [[unlikely]] {
+				throw std::length_error("Array size exceeds maximum limit.");
+			}
+			M_FillValueConstruct(count, value);
+		}
+		template <typename InputIterator>
+			/* SFINAE: ,typename = std::enable_if_t<!std::is_integral_v<InputIterator>>*/
+			requires (!std::is_integral_v<InputIterator>)
+		constexpr Array(InputIterator first, InputIterator last, const AllocatorType& allocator=AllocatorType()) 
+			noexcept (std::is_nothrow_copy_constructible_v<AllocatorType>)
 			: m_Data(MemoryTools::OneConstructCompressedTag{}, allocator) {
 
-			this->M_FillZeroConstruct(count);
+			static_assert(
+				std::is_integral_v<typename std::iterator_traits<InputIterator>::value_type> == false,
+				"InputIterator should not be an integral type."
+			);
+			M_RangeInitialize(first, last, typename std::iterator_traits<InputIterator>::iterator_category{});
 		}
-		constexpr Array(size_type count, const reference value, const AllocatorType& allocator=AllocatorType()) {}
-		template <typename InputIterator>
-		constexpr Array(InputIterator first, InputIterator last, const AllocatorType& allocator=AllocatorType()) {}
-		Array(std::initializer_list<value_type> list, const AllocatorType& allocator=AllocatorType()){}
+		Array(std::initializer_list<value_type> list, const AllocatorType& allocator=AllocatorType())
+			noexcept (std::is_nothrow_copy_constructible_v<AllocatorType>)
+			: Array(list.begin(), list.end(), allocator) /* 委托构造 */ { }
 		constexpr Array(const Array& other) {}
 		constexpr Array(Array&& other) noexcept {}
 
@@ -567,7 +599,7 @@ namespace Potato {
 		[[nodiscard]] constexpr Array& operator=(Array&& other) noexcept {}
 		[[nodiscard]] constexpr Array& operator=(std::initializer_list<value_type> list) {}
 		[[nodiscard]] constexpr reference operator[](const size_type index) noexcept {}
-		[[nodiscard]] constexpr const reference operator[](const size_type index) const noexcept {}
+		[[nodiscard]] constexpr const_reference operator[](const size_type index) const noexcept {}
 		[[nodiscard]] Array& operator+=(const Array& other) {}
 		[[nodiscard]] Array& operator+=(Array&& other) {}
 		[[nodiscard]] Array& operator+=(std::initializer_list<value_type> list) {}
@@ -585,8 +617,8 @@ namespace Potato {
 		[[nodiscard]] constexpr reference At(const size_type index) {}
 		[[nodiscard]] constexpr const_reference At(const size_type index) const {}
 
-		[[nodiscard]] constexpr size_type Find(const reference item) const {}
-		[[nodiscard]] constexpr size_type Find(const reference item) {}
+		[[nodiscard]] constexpr size_type Find(const_reference item) const {}
+		[[nodiscard]] constexpr size_type Find(const_reference item) {}
 		template <typename Predicate>
 		[[nodiscard]] constexpr size_type FindIf(Predicate pred) const {}
 		template <typename Predicate>
@@ -597,12 +629,14 @@ namespace Potato {
 		template <typename Predicate>
 		[[nodiscard]] constexpr Array Filter(Predicate pred) {}
 
-		[[nodiscard]] constexpr size_type Count(const reference item) const {}
+		[[nodiscard]] constexpr size_type Count(const_reference item) const {
+			return m_Data.finish - m_Data.start;
+		}
 
 		template <typename Predicate>
 		[[nodiscard]] constexpr size_type Count(Predicate pred) const {}
 
-		[[nodiscard]] constexpr bool IsContain(const reference item) const { return true; }
+		[[nodiscard]] constexpr bool IsContain(const_reference item) const { return true; }
 		template <typename Predicate>
 		[[nodiscard]] constexpr bool IsContain(Predicate pred) const { return true; }
 
@@ -649,43 +683,146 @@ namespace Potato {
 		template <typename ... Args>
 		constexpr reference EmplaceBack(Args&& ... args) {}
 
-		constexpr iterator Push(const value_type& value) {}
-		constexpr iterator Push(value_type& value) {}
-		constexpr iterator Pop() noexcept {}
-		constexpr iterator Top() noexcept {}
-		constexpr const_iterator Top() const noexcept {}
+		/** 
+		 * @brief: 栈语义的API: Push / Pop / Top ========================== 
+		 */
+		constexpr iterator Push(const value_type& value) {
+			return M_Emplace(cend(), value);
+		}
+		
+		constexpr iterator Push(value_type&& value) {
+			return M_Emplace(cend(), std::move(value));
+		}
+
+		/**
+		 * @brief 移除数组末尾的元素
+		 * @note: 强异常安全性(Strong Exception Guarantee).
+		 *     Pop 和 Top 的分开是 Cpp 标准库的实现者为了保证强异常安全的涉及. 见:
+		 *
+		 *       https://www.boost.org/doc/user-guide/exception-safety.html
+		 *       https://stackoverflow.com/questions/25035691/why-doesnt-stdqueuepop-return-value
+		 *     
+		 * 简单来说, Top() 是可以发生异常的, 内存耗尽或者临时对象构造失败都会抛出异常,
+		 * 如果 Pop() 和 Top() 合并成一个操作, 当 Top() 抛出异常时, 同时元素已经被移除,
+		 * 这就违反了强异常安全性的要求: **要么操作成功, 要么容器状态不变**.
+		 *
+		 * > More formally, we can describe a component as minimally 
+		 * > exception-safe if, when exceptions are thrown from within that 
+		 * > component, its invariants are intact. 
+		 * 	
+		 * T Pop() {
+		 * 		T result = data.back(); // 1. Copy: 可能抛异常 (Strong Guarantee)
+		 * 		data.pop_back();        // 2. Remove: 必须不抛异常
+		 * 		return result;          // 3. Return: 可能涉及 Copy/Move 可能抛异常
+		 * }
+		 * 如果 3. 抛出异常, 则数据没有的同时也了抛出了异常
+		 * 
+		 * 其他语言之所以可以实现, 因为其底层的对象模型都是以指针,引用的形式进行的. 
+		 * 而指针和引用都是轻量级的, 复制和移动都不会抛出异常. 来回移动的只是指针, 真正
+		 * 的对象并没有被移动. C++ 之所以不能这样做, 是因为 C++ 的对象模型是值语义的,
+		 * 复制和移动都可能涉及到深拷贝, 这就可能抛出异常. 
+		 * 在 Rust 中, 编译器保证数据的所有权从 Vec 转移到了返回, 如果 move 过程中出错
+		 * 程序会直接 panic, 而不是抛出异常
+		 */
+		constexpr void Pop() noexcept {
+			assert(!IsEmpty() && "Array::Pop(): Array is empty");
+			auto& M_Data    = this->m_Data.data;
+			pointer& finish = M_Data.finish;
+			if (finish > M_Data.start) {
+				--finish;
+				std::allocator_traits<AllocatorType>::destroy(M_GetAllocator(), finish);
+			}
+		}
+
+		[[nodiscard]] constexpr reference Top() noexcept {
+			assert(!IsEmpty() && "Array::Top(): Array is empty");
+			return *(end() - 1);
+		}
+
+		[[nodiscard]] constexpr const_reference Top() const noexcept {
+			assert(!IsEmpty() && "Array::Top(): Array is empty");
+			return *(end() - 1);
+		}
 
 		constexpr void Resize(size_type count) {}
 		constexpr void Resize(size_type count, const value_type& value) {}
 		constexpr void Reserve(size_type capacity) {}
 		constexpr void Swap() noexcept {}
 
-		bool IsEmpty() const noexcept {}
-		size_type GetSize() const noexcept {}
-		size_type GetCapacity() const noexcept {}
-		size_type GetSlack() const noexcept {}
+		bool IsEmpty() const noexcept {
+			return M_Size() == 0;
+		}
+		size_type Size() const noexcept {}
+		size_type Capacity() const noexcept {}
+		size_type Slack() const noexcept {}
 
 		void Shrink() noexcept {}
 
 	public:
-		[[nodiscard]] constexpr iterator begin() noexcept {}
-		[[nodiscard]] constexpr const_iterator begin() const noexcept {}
-		[[nodiscard]] constexpr const_iterator cbegin() const noexcept {}
+		[[nodiscard]] constexpr iterator begin() noexcept {
+			return iterator(m_Data.data.start);
+		}
+		[[nodiscard]] constexpr const_iterator begin() const noexcept {
+			return const_iterator(m_Data.data.start);
+		}
+		[[nodiscard]] constexpr const_iterator cbegin() const noexcept {
+			return const_iterator(m_Data.data.start);
+		}
 
-		[[nodiscard]] constexpr iterator end() noexcept {}
-		[[nodiscard]] constexpr const_iterator end() const noexcept {}
-		[[nodiscard]] constexpr const_iterator cend() const noexcept {}
+		[[nodiscard]] constexpr iterator end() noexcept {
+			return iterator(m_Data.data.finish);
+		}
+		[[nodiscard]] constexpr const_iterator end() const noexcept {
+			return const_iterator(m_Data.data.finish);
+		}
+		[[nodiscard]] constexpr const_iterator cend() const noexcept {
+			return const_iterator(m_Data.data.finish);
+		}
 
-		[[nodiscard]] constexpr reverse_iterator rbegin() noexcept {}
-		[[nodiscard]] constexpr reverse_const_iterator rbegin() const noexcept {}
-		[[nodiscard]] constexpr reverse_const_iterator crbegin() const noexcept {}
+		[[nodiscard]] constexpr reverse_iterator rbegin() noexcept {
+			return reverse_iterator(end());
+		}
+		[[nodiscard]] constexpr reverse_const_iterator rbegin() const noexcept {
+			return reverse_const_iterator(end());
+		}
+		[[nodiscard]] constexpr reverse_const_iterator crbegin() const noexcept {
+			return reverse_const_iterator(cend());
+		}
 
-		[[nodiscard]] constexpr reverse_iterator rend() noexcept {}
-		[[nodiscard]] constexpr reverse_const_iterator rend() const noexcept {}
-		[[nodiscard]] constexpr reverse_const_iterator crend() const noexcept {}
+		[[nodiscard]] constexpr reverse_iterator rend() noexcept {
+			return reverse_iterator(begin());
+		}
+		[[nodiscard]] constexpr reverse_const_iterator rend() const noexcept {
+			return reverse_const_iterator(begin());
+		}
+		[[nodiscard]] constexpr reverse_const_iterator crend() const noexcept {
+			return reverse_const_iterator(cbegin());
+		}
 
 	private:
 
+		/**
+		 * @brief 清理容器内存的守卫, 用于在异常情况下自动清理容器内存
+		 * @usage: 
+		 * 	CleanGuard Guard{ this };
+		 *         you code ...
+		 *     Guard.Release();
+		 *
+		 *     其工作原理时, 当异常发生时, 会自动调用容器的 M_Clear() 方法清理内存,
+		 *     Eg: 在内存分配的时候, 如果构造函数抛出异常, 则异常会一直抛出至 Array 
+		 *         的构造函数中, 同时 C++ 标准规则构造函数抛出异常时, 不会调用析构函数
+		 *         所以此时就发生了内存泄漏, 使用 CleanGuard 可以避免这种情况的发生.
+		 *
+		 *     C++ 的生命周期规则认为: 只有当构造函数完整执行完毕, 即 代码执行到了右花
+		 *     括号 } 并没有异常，一个对象才被视为"已构造(Fully Constructed)". 
+		 *     如果在构造函数体内发生了异常, 那么该对象就不会被视为已构造, 因此其析构函
+		 *     数不会被调用. 
+		 *     
+		 * cppreference.com 的解释: 
+		 *     https://en.cppreference.com/w/cpp/language/lifetime.html
+		 *     https://en.cppreference.com/w/cpp/language/destructor.html
+		 *     https://en.cppreference.com/w/cpp/language/throw.html#Stack_unwinding
+		 */
 		template <typename Container>
 		struct [[nodiscard]] CleanGuard {
 			Container* container;
@@ -750,7 +887,12 @@ namespace Potato {
 
 			assert(start == nullptr && finish == nullptr && end_of_storage == nullptr && "memory must not be already allocated.");
 
-			const pointer mem = M_GetAllocator().allocate(count);
+			if (count == 0) [[unlikely]] {
+				return ;
+			}
+
+			pointer mem = M_GetAllocator().allocate(count);
+
 			start           = mem;
 			finish          = mem;
 			end_of_storage  = mem + count;
@@ -759,18 +901,18 @@ namespace Potato {
 		 * @brief 拷贝填充构造 -> 对应构造函数 Array(n) -> 其会默认进行零初始化或者默认构造
 		 * @param count 元素个数
 		 */
-		template <typename Ty2>
-		constexpr void M_FillZeroConstruct (const size_type count, const Ty2& value) {
-			if (count == 0) return;
+		constexpr void M_FillZeroConstruct (const size_type count) {
+			if (count == 0) [[unlikely]] return;
 
 			auto& allocator = M_GetAllocator();
 			auto& M_Data    = this->m_Data.data;
 			pointer& start  = M_Data.start;
+			pointer& finish = M_Data.finish;
 
 			this->M_AllocateUninitializedMemory(count);
 			CleanGuard Guard{ this };
-			std::uninitialized_value_construct_n(start, count);
-			Guard.container = nullptr;
+			finish = std::uninitialized_value_construct_n(start, count);
+			Guard.Release();
 		}
 
 		/**
@@ -785,11 +927,34 @@ namespace Potato {
 			auto& allocator = M_GetAllocator();
 			auto& M_Data    = this->m_Data.data;
 			pointer& start  = M_Data.start;
+			pointer& finish = M_Data.finish;
 
 			this->M_AllocateUninitializedMemory(count);
 			CleanGuard Guard{ this };
-			std::uninitialized_fill_n(start, count, value);
+			finish = std::uninitialized_fill_n(start, count, value);
 			Guard.Release();
+		}
+
+		template <typename FoewardIterator>
+		constexpr void M_RangeInitialize(ForwardIterator first, ForwardIterator last, std::forward_iterator_tag){
+			const auto count = static_cast<size_type>(std::distance(first, last));
+			if (count == 0) [[unlikely]] return;
+
+			M_AllocateUninitializedMemory(count);
+			CleanGuard Guard{ this };
+
+			auto&    M_Data = this->m_Data.data;
+			pointer& finish = M_Data.finish;
+
+			finish = std::uninitialized_copy(first, last, M_Data.start);
+			Guard.Release();
+		}
+
+		template <typename InputIterator>
+		constexpr void M_RangeInitialize(InputIterator first, InputIterator last, std::input_iterator_tag){
+			for (; first != last; ++first){
+
+			}
 		}
 
 		template <typename ResizeType>
@@ -947,8 +1112,8 @@ namespace Potato {
 		}
 
 		constexpr void M_Clear() noexcept {
-			auto& allocator = M_GetAllocator();
-			auto& M_Data            = this->m_Data.data;
+			auto&    allocator      = M_GetAllocator();
+			auto&    M_Data         = this->m_Data.data;
 			pointer& start          = M_Data.start;
 			pointer& finish         = M_Data.finish;
 			pointer& end_of_storage = M_Data.end_of_storage;
@@ -964,6 +1129,177 @@ namespace Potato {
 			}
 		}
 
+		/**
+		 * @brief 内部通用的 Emplace 方法, 其是一个通用的插入器, 
+		 * @       可以同时用于 Copy 和 Move 的场景  
+		 *       其核心操作:
+		 *            std::allocator_traits<AllocatorType>::construct(
+		 *            	alloc, 
+		 *            	ptr, 
+		 *            	std::forward<Args>(args)...
+		 *            );
+		 *      等价于 new (ptr) T(std::forward<Args>(args)...);
+		 *       1. 传入一个已经存在的对象: const value_type& obj -> 拷贝构造
+		 *       2. 传入一个将要被销毁的对象: value_type&& obj -> 移动构造
+		 *  	 3. 传入构造参数列表: Args&& ...args -> 完美转发构造
+		 * @param position: 插入位置(必须有效, 由调用者保证)
+		 * @param ...args: 构造参数
+		 * @return: 返回新插入元素的迭代器
+		 */
+		template <typename ... Args>
+		constexpr iterator M_Emplace(const_iterator position, Args&& ...args){
+			auto&    M_Data         = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
+
+			const auto offset = static_cast<difference_type>(position - cbegin());
+			pointer insert_pos_ptr = start + offset;
+			
+			assert(insert_pos_ptr >= start && insert_pos_ptr <= finish && "Array::M_Emplace(const_iterator, Args&& ...args) Runtime Error: position iterator out of range - 插入位置迭代器越界");
+
+			// Case1: 还有多余空间, 也是最常见的情况
+			if (finish != end_of_storage) [[likely]] {
+				// Case1.1: 直接在末尾插入元素, 无需搬运数据, 直接就地构造
+				if (insert_pos_ptr == finish) {
+					std::allocator_traits<AllocatorType>::construct(
+						M_GetAllocator(),
+						std::addressof(*finish),
+						std::forward<Args>(args)...
+					);
+					++finish;
+				}
+
+				// Case1.2: 需要搬运数据
+				else {
+				/**
+				 *   @note: 这里构造 temp 是自引用安全性 
+				 *   		args 可能是容器内部元素的引用 (Aliasing)
+				 *   	    这意味着我们不能先移动数据覆盖旧值, 再用旧引用去构造, 
+				 *   	    必须先构造一个临时对象保存值
+				 *   @example: 
+				 *   		Array<string> arr = {'a', 'b', 'c'};
+				 *       	arr.Emplace(arr.begin(), arr[1]); 
+				 *  
+				 *   如果此时没有先构造临时对象, 在移动完数据之后 arr[1] 就已经被
+				 *   掏空的状态(moved-from), 导致插入的不是 'b' 而是一个空字符串
+				 *  
+				 *   - 对于拷贝构造 (左值引用): 它创建了一份副本. 即使原数据在搬运
+				 *   过程中被覆盖或移动，副本依然有效
+				 *   - 对于移动构造 (右值引用): 虽然右值引用通常不涉及自引用(即将销毁)
+				 *   但为了逻辑统一和安全，先具象化(Materialize)这个对象，再进行内部
+				 *   内存的洗牌
+				 */
+				 *  
+					value_type temp(std::forward<Args>(args)...);
+
+					std::allocator_traits<AllocatorType>::construct(
+						M_GetAllocator(),
+						std::addressof(*(finish)),
+						std::move(*(finish - 1))
+					);
+					++finish;
+
+					// 将 [pos, finish-2] 整体向后移动一步到 [pos+1, finish-1]
+					// finish 已经自增过了，原最后一个元素位于 finish-2
+					std::move_backward(insert_pos_ptr, finish - 2, finish - 1);
+
+					*insert_pos_ptr = std::move(temp);
+				}
+			}
+			// Case2: 没有多余空间, 需要重新分配内存(扩容)
+			else {
+				M_RellocateAndEmplace(insert_pos_ptr, std::forward<Args>(args)...);
+			}
+			return begin() + offset;
+		}
+
+		/**
+		 *       start 			finish == end_of_storage
+		 *	old: | - - - - - o - - - - - | 	
+		 *                     ^
+		 *			    insert_pos_ptr (overflow)
+		 *
+		 *	After CalculateGrowth: (2times growth)
+		 *       new_start            new_finish         new_end_of_storage
+		 *	new: | - - - - - o - - - - - * - - - - - - - - - - | 	
+		 *					 ^
+		 *			  new_insert_pos_ptr	 	
+		 *
+		 */
+		template <typename ... Args>
+		constexpr void M_RellocateAndEmplace(pointer insert_pos_ptr, Args&& ...args){
+			auto&	allocator      = M_GetAllocator();
+			auto&   M_Data         = this->m_Data.data;
+			
+			// step1: 计算新容量
+			const size_type old_size = M_Size();
+			const size_type new_capacity = M_CalculateGrowth(old_size + 1);
+
+			pointer new_start = allocator.allocate(new_capacity);
+			pointer new_finish = new_start;
+
+			const difference_type insert_offset = insert_pos_ptr - M_Data.start;
+			pointer new_insert_pos_ptr = new_start + insert_offset;
+
+			// step2: 创建新元素
+			try {
+				// 强异常保证
+				std::allocator_traits<AllocatorType>::construct(
+					allocator,
+					std::addressof(*new_insert_pos_ptr),
+					std::forward<Args>(args)...
+				);
+			} catch (...) {
+				allocator.deallocate(new_start, new_capacity);
+				throw;
+			}
+
+			// step3: 搬运旧数据
+			try {
+				// 搬运前半部分
+				new_finish = std::uninitialized_move(
+					M_Data.start,
+					insert_pos_ptr,
+					new_start
+				);
+
+				// 跳过刚刚插入之后的数据
+				++new_finish; 
+
+				// 搬运后半部分
+				new_finish = std::uninitialized_move(
+					insert_pos_ptr,
+					M_Data.finish,
+					new_finish
+				);
+			} catch (...) {
+				/**
+			     * - 如果搬运过程中抛出异常，销毁新内存中已经构造好的所有对象, 此时 
+			     *   new_finish 指向最后尝试构造的位置，或者刚构造完的位置. 
+			     * - 如果是 construct(new_pos) 之后的 uninitialized_move 抛出, 则
+			     *   需要销毁 new_pos 处的对象
+			     * - 如果是在前半段搬运途中失败，new_finish 指向搬運到的位置 destroy 
+			     *   会销毁它们. 同时也需要销毁那个单独构造的 new_pos_ptr 处的元素
+			     */
+                std::destroy(new_start, new_finish); 
+                if (new_finish <= new_pos_ptr) {
+                    // 意味着异常发生在前半段或者刚好 construct 完
+                    std::allocator_traits<AllocatorType>::destroy(allocator, new_pos_ptr);
+                }
+                allocator.deallocate(new_start, new_capacity);
+                throw;
+			}
+
+			// step4: 释放旧内存
+			std::destroy(M_Data.start, M_Data.finish);
+			allocator.deallocate(M_Data.start, static_cast<size_type>(M_Data.end_of_storage - M_Data.start));
+
+			// step5: 更新数据指针
+			M_Data.start          = new_start;
+			M_Data.finish         = new_finish;
+			M_Data.end_of_storage = new_start + new_capacity;
+		} 
 	private:
 		M_RealValueType m_Data;
 	};
