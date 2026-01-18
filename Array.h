@@ -1320,19 +1320,7 @@ namespace Potato {
 			return begin() + offset;
 		}
 
-		/**
-		 *       start 			finish == end_of_storage
-		 *	old: | - - - - - o - - - - - | 	
-		 *                     ^
-		 *			    insert_pos_ptr (overflow)
-		 *
-		 *	After CalculateGrowth: (2times growth)
-		 *       new_start            new_finish         new_end_of_storage
-		 *	new: | - - - - - o - - - - - * - - - - - - - - - - | 	
-		 *					 ^
-		 *			  new_insert_pos_ptr	 	
-		 *
-		 */
+		
 		
 		/**
 		 * @brief 内部通用的 EmplaceBack 方法, 其是一个通用的追加器, 
@@ -1390,6 +1378,21 @@ namespace Potato {
 			}
 		}
 
+		/**
+		 *       start 			finish == end_of_storage
+		 *	old: | - - - - - o - - - - - | 	
+		 *                     ^
+		 *			    insert_pos_ptr (overflow)
+		 *
+		 *	After CalculateGrowth: (2times growth)
+		 *       new_start            new_finish         new_end_of_storage
+		 *	new: | - - - - - o - - - - - * - - - - - - - - - - | 	
+		 *					 ^
+		 *			  new_insert_pos_ptr	 	
+		 *
+		 */
+
+		 
 		/**
 		 * @brief 在指定位置创建一个 "洞" (Gap), 用于后续填充.
 		 * @param position 插入位置
