@@ -680,18 +680,14 @@ namespace Potato {
 		Array Difference(const Array<Ty2>& other) const noexcept;
 
 		constexpr iterator Insert(const_iterator position, const value_type& value) {
-			pointer ptr = M_InsertHole(position, 1, false);
-			std::allocator_traits<AllocatorType>::construct(M_GetAllocator(), ptr, value);
-			return iterator(ptr);
+			return M_Emplace(position, 1, value);
 		}
 		constexpr iterator Insert(const_iterator position, value_type&& value) {
-			pointer ptr = M_InsertHole(position, 1, false);
-			std::allocator_traits<AllocatorType>::construct(M_GetAllocator(), ptr, std::move(value));
-			return iterator(ptr);
+			return M_Emplace(position, 1, std::move(value));
 		}
 		constexpr iterator Insert(const_iterator position, size_type count, const value_type& value) {
 			pointer ptr = M_InsertHole(position, count, false);
-			std::uninitialized_fill_n(ptr, count, value);
+			std::fill_n(ptr, count, value);
 			return iterator(ptr);
 		}
 		template <typename InputIterator>
@@ -699,7 +695,7 @@ namespace Potato {
 			if constexpr (std::is_base_of_v<std::forward_iterator_tag, typename std::iterator_traits<InputIterator>::iterator_category>) {
 				const auto count = static_cast<size_type>(std::distance(first, last));
 				pointer ptr = M_InsertHole(position, count, false);
-				std::uninitialized_copy(first, last, ptr);
+				std::copy(first, last, ptr);
 				return iterator(ptr);
 			} else {
 				// InputIterator cannot calculate count, so we can't use M_InsertHole easily without buffering or repeated inserts
@@ -728,16 +724,16 @@ namespace Potato {
 		}
 
 		constexpr void InsertUninitializedItem(const_iterator position) {
-			M_InsertHole(position, 1, false);
+			M_InsertHoles(position, 1, false);
 		}
 		constexpr void InsertUninitializedItem(const_iterator position, const size_type count) {
-			M_InsertHole(position, count, false);
+			M_InsertHoles(position, count, false);
 		}
 		constexpr reference InsertZeroedItem(const_iterator position) {
-			return *M_InsertHole(position, 1, true);
+			return *M_InsertHoles(position, 1, true);
 		}
 		constexpr reference InsertZeroedItem(const_iterator position, const size_type count) {
-			return *M_InsertHole(position, count, true);
+			return *M_InsertHoles(position, count, true);
 		}
 
 		constexpr iterator InsertUnique(size_type index, value_type& value) {}
@@ -809,12 +805,18 @@ namespace Potato {
 		}
 
 		template <typename ... Args>
-		constexpr iterator Emplace(const_iterator position, Args&& ... args) {}
+		constexpr iterator Emplace(const_iterator position, Args&& ... args) {
+			return M_Emplace(position, 1, std::forward<Args>(args)...);
+		}
 		template <typename ... Args>
-		constexpr iterator EmplaceAt(size_type index, Args&& ... args) {}
+		constexpr iterator EmplaceAt(size_type index, Args&& ... args) {
+			return M_Emplace(cbegin() + index, 1, std::forward<Args>(args)...);
+		}
 
 		template <typename ... Args>
-		constexpr reference EmplaceBack(Args&& ... args) {}
+		constexpr reference EmplaceBack(Args&& ... args) {
+			return M_EmplaceBack(std::forward<Args>(args)...);
+		}
 
 		constexpr iterator Erase(const_iterator position){}
 		constexpr iterator Erase(const_iterator first, const_iterator last){}
@@ -830,11 +832,11 @@ namespace Potato {
 		 * @brief: 栈语义的API: Push / Pop / Top ========================== 
 		 */
 		constexpr iterator Push(const value_type& value) {
-			return M_Emplace(cend(), value);
+			return M_Emplace(cend(), 1, value);
 		}
 		
 		constexpr iterator Push(value_type&& value) {
-			return M_Emplace(cend(), std::move(value));
+			return M_Emplace(cend(), 1, std::move(value));
 		}
 
 		/**
@@ -890,7 +892,7 @@ namespace Potato {
 		constexpr void Resize(size_type count) {}
 		constexpr void Resize(size_type count, const value_type& value) {}
 		constexpr void Reserve(size_type capacity) {}
-		constexpr void Swap() noexcept {}
+		constexpr void Swap(Array& other) noexcept {}
 		
 	
 		bool IsEmpty() const noexcept {
@@ -904,7 +906,7 @@ namespace Potato {
 		}
 		size_type Slack() const noexcept {}
 
-		void Shrink() noexcept {}
+		void ShrinkToFit() noexcept {}
 
 	public:
 		[[nodiscard]] constexpr iterator begin() noexcept {
@@ -1030,13 +1032,7 @@ namespace Potato {
 			pointer& finish         = M_Data.finish;
 			pointer& end_of_storage = M_Data.end_of_storage;
 
-			assert(start == nullptr && finish == nullptr && end_of_storage == nullptr && "memory must not be already allocated.");
-
-			if (count == 0) [[unlikely]] {
-				return ;
-			}
-
-			pointer mem = M_GetAllocator().allocate(count);
+			M_InsertHoles(first, count, false);
 
 			start           = mem;
 			finish          = mem;
@@ -1080,26 +1076,24 @@ namespace Potato {
 			Guard.Release();
 		}
 
-		template <typename FoewardIterator>
+		template <typename ForwardIterator>
 		constexpr void M_RangeInitialize(ForwardIterator first, ForwardIterator last, std::forward_iterator_tag){
 			const auto count = static_cast<size_type>(std::distance(first, last));
 			if (count == 0) [[unlikely]] return;
 
 			M_AllocateUninitializedMemory(count);
+			
 			CleanGuard Guard{ this };
 
 			auto&    M_Data = this->m_Data.data;
-			pointer& finish = M_Data.finish;
-
-			finish = std::uninitialized_copy(first, last, M_Data.start);
+			M_Data.finish = std::uninitialized_copy(first, last, M_Data.start);
+			
 			Guard.Release();
 		}
 
 		template <typename InputIterator>
 		constexpr void M_RangeInitialize(InputIterator first, InputIterator last, std::input_iterator_tag){
-			for (; first != last; ++first){
-
-			}
+			this->Append(first, last);
 		}
 
 		template <typename ResizeType>
@@ -1114,9 +1108,7 @@ namespace Potato {
 
 			if (new_size < old_size) {
 				// 内存收缩
-				const pointer new_finish = start + new_size;
-				std::destroy_n(new_finish, old_size - new_size);
-				finish -= new_finish;
+				ShrinkToFit(new_size);
 			} else if (new_size > old_size) {
 				// 内存扩张, 先检查容量是否足够
 				const auto old_capacity = static_cast<size_type>(end_of_storage - start);
@@ -1177,11 +1169,13 @@ namespace Potato {
 				appended_finish = std::uninitialized_fill_n(appended_start, increased_size, value);
 			}
 
-			// 搬运旧数据: 能移动就移动, 不能移动就拷贝
-			if constexpr (std::is_nothrow_move_constructible_v<ElementType> || !std::is_copy_constructible_v<ElementType>) {
-				std::uninitialized_move_n(start, old_size, new_arr);
-			}else {
-				std::uninitialized_copy_n(start, old_size, new_arr);
+			// 搬运旧数据: (old_start, count, new_start)
+			M_TryUninitializedMove(start, old_size, new_arr);
+			
+			// 重要: 提交之前必须销毁旧对象
+			if (start) {
+				std::destroy_n(start, old_size);
+				allocator.deallocate(start, static_cast<size_type>(end_of_storage - start));
 			}
 
 			this->M_UpdateData(new_arr, new_size, new_capacity);
@@ -1289,96 +1283,73 @@ namespace Potato {
 		 *  	 3. 传入构造参数列表: Args&& ...args -> 完美转发构造
 		 * @param position: 插入位置(必须有效, 由调用者保证)
 		 * @param ...args: 构造参数
+		 * @param count: 重复插入的数量
 		 * @return: 返回新插入元素的迭代器
 		 */
 		template <typename ... Args>
-		constexpr iterator M_Emplace(const_iterator position, Args&& ...args){
-			auto&    M_Data         = this->m_Data.data;
-			pointer& finish         = M_Data.finish;
+		constexpr iterator M_Emplace(const_iterator position, const size_t count, Args&& ...args) {
+			auto& M_Data         = this->m_Data.data;
+			const difference_type offset = position - cbegin();
+			pointer insert_pos_ptr = M_Data.start + offset;
 
-			const auto offset = static_cast<difference_type>(position - cbegin());
-			
-			// Quick path for push_back
-			if (offset == M_Size()) {
-				M_EmplaceBack(std::forward<Args>(args)...);
-				return begin() + offset;
+			if (count == 0) return iterator(insert_pos_ptr);
+
+			// 1. Fast Path: Single Element Append (Zero Overhead)
+			if (count == 1 && insert_pos_ptr == M_Data.finish && M_Data.finish != M_Data.end_of_storage) {
+				std::allocator_traits<AllocatorType>::construct(
+					M_GetAllocator(), 
+					M_Data.finish, 
+					std::forward<Args>(args)...
+				);
+				M_Data.finish++;
+				return iterator(insert_pos_ptr);
 			}
 
-			// 1. Materialize temporary to handle aliasing
+			// 2. Materialize Temporary
+			// 必须先构造临时对象，因为：
+			// a) 可能扩容/移动，导致 args 指向的源数据失效 (Aliasing)
+			// b) count > 1 时，args 被使用多次，不能 forward
+			// c) M_InsertHoles 会修改内存布局
 			value_type temp(std::forward<Args>(args)...);
 
-			// 2. Open a hole
-			pointer insert_pos_ptr = M_InsertHole(position, 1, false);
+			// 3. Make Space
+			// 注意: M_InsertHoles 现在会对非 Trivial 类型进行 Default Construct
+			// 这意味着该区域已经是 Valid Object
+			pointer ptr = M_InsertHoles(insert_pos_ptr, count, false);
 
-			// 3. Move Construct
-			std::allocator_traits<AllocatorType>::construct(
-				M_GetAllocator(),
-				insert_pos_ptr,
-				std::move(temp)
-			);
-			
-			return begin() + offset;
+			// 4. Fill Values
+			// 使用 Assignment 而非 Construct，因为对象已存在
+			// 如果 value_type 是 Trivial, Assignment 和 Construct 是一样的 (memcpy)
+			// 如果 value_type 非 Trivial, M_InsertHoles 已构造了默认值，这里进行赋值覆盖
+			if (count == 1) {
+				if constexpr (std::is_move_assignable_v<value_type>) {
+					*ptr = std::move(temp);
+				} else {
+					*ptr = temp;
+				}
+			} else {
+				std::fill_n(ptr, count, temp);
+			}
+
+			return iterator(ptr);
 		}
-
-		
 		
 		/**
-		 * @brief 内部通用的 EmplaceBack 方法, 其是一个通用的追加器, 
-		 * @       可以同时用于 Copy 和 Move 的场景  
-		 *       其核心操作:
-		 *            std::allocator_traits<AllocatorType>::construct(
-		 *            	alloc, 
-		 *            	ptr, 
-		 *            	std::forward<Args>(args)...
-		 *            );
-		 *      等价于 new (ptr) T(std::forward<Args>(args)...);
-		 *       1. 传入一个已经存在的对象: const value_type& obj -> 拷贝构造
-		 *       2. 传入一个将要被销毁的对象: value_type&& obj -> 移动构造
-		 *  	 3. 传入构造参数列表: Args&& ...args -> 完美转发构造
-		 * @param ...args: 构造参数
-		 * @return: 返回新插入元素的引用
+		 * @brief 内部通用的 EmplaceBack 方法
+		 * @note 现已简化为 M_Emplace 的 Wrapper，逻辑已整合
 		 */
 		template <typename ... Args>
 		constexpr reference M_EmplaceBack(Args&& ... args) {
-			auto& allocator = M_GetAllocator();
-			auto& M_Data    = this->m_Data.data;
-
-			if (M_Data.finish != M_Data.end_of_storage) [[likely]] {
-				std::allocator_traits<AllocatorType>::construct(
-					allocator,
-					M_Data.finish,
-					std::forward<Args>(args)...
-				);
-				return *M_Data.finish++;
-			} else {
-				// Realloc path: must materialize to avoid aliasing issues during realloc
-				value_type temp(std::forward<Args>(args)...);
-				// M_InsertHole at end() simply reallocates and moves old elements
-				pointer ptr = M_InsertHole(cend(), 1, false);
-				std::allocator_traits<AllocatorType>::construct(
-					allocator,
-					ptr,
-					std::move(temp)
-				);
-				return *ptr;
-			}
-		}
-
-		template <typename InputIterator>
-		constexpr void M_AppendRange(InputIterator first, size_type count) {
-			if (count == 0) return;
-			auto& M_Data = this->m_Data.data;
-
-			if (static_cast<size_type>(M_Data.end_of_storage - M_Data.finish) >= count) {
-				M_Data.finish = std::uninitialized_copy_n(first, count, M_Data.finish);
-			} else {
-				M_ReallocateAndInsertHole(M_Data.finish, count, [&](pointer ptr, size_type n) {
-					return std::uninitialized_copy_n(first, n, ptr);
-				});
-			}
+			return *M_Emplace(cend(), 1, std::forward<Args>(args)...);
 		}
 
 		/**
+		 * @brief: 重新分配内存并在指定位置插入任意多空洞
+		 * @param pos: 插入位置
+		 * @param count: 空洞数量
+		 * @param is_zero_construct: 是否进行零初始化
+		 * @return: 返回新内存中空洞的起始位置
+		 *
 		 *       start 			finish == end_of_storage
 		 *	old: | - - - - - o - - - - - | 	
 		 *                     ^
@@ -1391,149 +1362,90 @@ namespace Potato {
 		 *			  new_insert_pos_ptr	 	
 		 *
 		 */
-
-		 
-		/**
-		 * @brief 在指定位置创建一个 "洞" (Gap), 用于后续填充.
-		 * @param position 插入位置
-		 * @param count 洞的数量
-		 * @param fill_zero 是否对洞进行零初始化 (Value Initialization)
-		 * @return 返回洞的起始位置指针
-		 */
-		pointer M_InsertHole(const_iterator position, size_type count, bool fill_zero) {
-			auto&    allocator      = M_GetAllocator();
-			auto&    M_Data         = this->m_Data.data;
-			pointer& start          = M_Data.start;
-			pointer& finish         = M_Data.finish;
-			pointer& end_of_storage = M_Data.end_of_storage;
-
-			const auto offset = static_cast<difference_type>(position - cbegin());
-			pointer insert_pos_ptr = start + offset;
-
-			if (count == 0) return insert_pos_ptr;
-
-			if (static_cast<size_type>(end_of_storage - finish) >= count) {
-				// Fast Path: 如果是在末尾插入，且空间足够，直接移动 finish 指针即可
-				if (insert_pos_ptr == finish) {
-					finish += count;
-					if (fill_zero) {
-						std::uninitialized_value_construct_n(insert_pos_ptr, count);
-					}
-					return insert_pos_ptr;
-				}
-
-				const size_type elems_after = finish - insert_pos_ptr;
-				pointer old_finish = finish;
-				finish += count;
-
-				// 策略: 先移动尾部数据到未初始化区域, 再移动剩余部分
-				if (elems_after > count) {
-					std::uninitialized_move(old_finish - count, old_finish, old_finish);
-					std::move_backward(insert_pos_ptr, old_finish - count, old_finish);
-				} else {
-					std::uninitialized_move(insert_pos_ptr, old_finish, insert_pos_ptr + count);
-				}
-
-				if (fill_zero) {
-					std::uninitialized_value_construct_n(insert_pos_ptr, count);
-				}
-
-				return insert_pos_ptr;
-			} else {
-				return M_ReallocateAndInsertHole(insert_pos_ptr, count, [&](pointer ptr, size_type n) {
-					if (fill_zero) {
-						return std::uninitialized_value_construct_n(ptr, n);
-					}
-					return ptr + n;
-				});
-			}
-		}
-
-		/**
-		 * @brief 核心扩容辅助函数: 重新分配内存并在指定位置插入"空洞" or "数据"
-		 * 
-		 * 此函数实现了 "Allocate-Move-Construct-Move-Deallocate" 的标准扩容流程，
-		 * 并通过回调函数 (Callback) 泛化了中间那个 "Hole" 的处理逻辑。
-		 * 
-		 * 流程分为三步:
-		 * 1. [Begin, Pos) -> 移动/拷贝到新内存头部
-		 * 2. [Hole]       -> 调用 gap_op 在中间位置构造/跳过
-		 * 3. [Pos, End)   -> 移动/拷贝到新内存尾部
-		 * 
-		 * @tparam GapOp: 回调函数类型, 签名应为 (pointer dest, size_type count) -> pointer (返回新的 finish)
-		 *                - 用于 InsertHole: 可能进行 default construct 或 leave uninitialized
-		 *                - 用于 AppendRange: 进行 range copy
-		 * @param pos:   旧内存中的插入点
-		 * @param count: 插入元素的数量 (Hole的大小)
-		 * @param gap_op: 填充中间区域的回调逻辑
-		 * 
-		 * @return pointer: 返回新内存中 "Hole" 的起始位置
-		 * 
-		 * @note 异常安全性: Strong Guarantee
-		 *       - 如果新内存分配失败，抛出异常，原 Array 不变。
-		 *       - 如果 gap_op 或数据搬运抛出异常，会自动析构新内存中已构造的对象并释放内存，
-		 *         原 Array 保持不变 (假设 move constructor 不抛异常)。
-		 */
-		template <typename GapOp>
-		pointer M_ReallocateAndInsertHole(pointer pos, size_type count, GapOp&& gap_op) {
+		pointer M_InsertHoles(pointer pos, size_type count, bool is_zero_construct) {
 			auto& allocator = M_GetAllocator();
 			auto& M_Data    = this->m_Data.data;
 
-			const size_type old_size = M_Size();
+			const size_type old_size     = M_Size();
 			const size_type new_capacity = M_CalculateGrowth(old_size + count);
 			
+			const size_type forward_size = static_cast<size_type>(pos - M_Data.start);
+			const size_type backward_size = static_cast<size_type>(M_Data.finish - pos);
+
 			pointer new_start = allocator.allocate(new_capacity);
-			pointer new_finish = new_start;
+			pointer new_hole_start = new_start + forward_size;
+			pointer new_backward_start = new_hole_start + count;
+			pointer new_finish = new_backward_start + backward_size;
+
+			ReallocateGuard Guard{
+				.allocator = allocator,
+				.new_start = new_arr,
+				.new_capacity = new_capacity,
+				.constructed_start = appended_start,
+				.constructed_finish = appended_start
+			};
 			
-			const difference_type offset = pos - M_Data.start;
-			pointer new_insert_pos = new_start + offset;
-
-			SimpleReallocateGuard Guard{allocator, new_start, new_capacity};
-
-			// step1. Move elements before pos
-			// 异常安全: 如果这里抛出异常, SimpleReallocateGuard 会释放内存, 无需 destroy
-			if (pos != M_Data.start) {
-				if constexpr (std::is_nothrow_move_constructible_v<value_type> || !std::is_copy_constructible_v<value_type>) {
-					new_finish = std::uninitialized_move(M_Data.start, pos, new_start);
-				} else {
-					new_finish = std::uninitialized_copy(M_Data.start, pos, new_start);
+			if constexpr (TypeTools::IsSimpleAllocVal<M_AllocatorType> && std::is_trivially_copyable_v<ElementType>) {
+				if (forward_size > 0) std::memcpy(new_start, M_Data.start, forward_size * sizeof(ElementType));
+				if (backward_size > 0) std::memcpy(new_backward_start, pos, backward_size * sizeof(ElementType));
+				
+				if (is_zero_construct) {
+					std::memset(new_hole_start, 0, count * sizeof(ElementType));
 				}
-			}
+				// 即使不 zero construct，对于 trivial 类型，内存已经是分配状态，逻辑上可以说既是 initialized 也是 uninitialized
+				Guard.Release();
+			} else {
+				// 1. Move前半部分
+				M_TryUninitializedMove(M_Data.start, forward_size, new_start);
+				Guard._c_finish = new_hole_start;
 
-			// step2. Handle Gap via Callback
-			try {
-				new_finish = gap_op(new_finish, count);
-			} catch(...) {
-				std::destroy(new_start, new_finish); // Clean First Part
-				throw;
-			}
-
-			// step3. Move elements after pos
-			try {
-				if constexpr (std::is_nothrow_move_constructible_v<value_type> || !std::is_copy_constructible_v<value_type>) {
-					std::uninitialized_move(pos, M_Data.finish, new_finish);
+				// 2. 插入空洞
+				if (is_zero_construct) {
+					Guard._c_finish = std::uninitialized_value_construct_n(Guard._c_finish, count);
 				} else {
-					std::uninitialized_copy(pos, M_Data.finish, new_finish);
+					// 确保非 trivial 类型也被构造，避免 UB
+					Guard._c_finish = std::uninitialized_default_construct_n(Guard._c_finish, count);
 				}
-				new_finish += (M_Data.finish - pos);
-			} catch (...) {
-				// uninitialized_move/copy 自身保证了若抛出异常会析构它构造的部分
-				// 我们需要析构之前已经构造好的部分 (First Part + Gap)
-				// 注意: new_finish 在 gap_op 之后已经指向 gap 之后的位置
-				std::destroy(new_start, new_finish); 
-				throw;
+
+				// 3. Move后半部分
+				M_TryUninitializedMove(pos, backward_size, new_backward_start);
+				Guard._c_finish = new_finish;
+				Guard.Release();
 			}
 
-			std::destroy(M_Data.start, M_Data.finish);
-			allocator.deallocate(M_Data.start, static_cast<size_type>(M_Data.end_of_storage - M_Data.start));
+			if (M_Data.start) {
+				std::destroy(M_Data.start, M_Data.finish);
+				allocator.deallocate(M_Data.start, static_cast<size_type>(M_Data.end_of_storage - M_Data.start));
+			}
 
 			M_Data.start          = new_start;
 			M_Data.finish         = new_finish;
 			M_Data.end_of_storage = new_start + new_capacity;
-			Guard.Release();
-			return new_insert_pos; 
+
+			return new_hole_start;
 		}
 
+		pointer M_TryUninitializedMove(pointer old_start, size_type count, pointer new_start) {
+			if constexpr (std::is_nothrow_move_constructible_v<ElementType> || !std::is_copy_constructible_v<ElementType>) {
+				return std::uninitialized_move(old_start, old_start + count, new_start);
+			} else {
+				return std::uninitialized_copy(old_start, old_start + count, new_start);
+			}
+		}
+		
+		void M_Swap(pointer& lhs, pointer& rhs) noexcept {
+			std::swap(lhs, rhs);
+		}
+		pointer M_EraseElement(pointer pos, const size_type count) {
+			auto& M_Data = this->m_Data.data;
+
+			pointer new_finish = std::move(pos + count, M_Data.finish, pos);
+
+			std::destroy(new_finish, M_Data.finish);
+			
+			M_Data.finish = new_finish;
+			return pos;
+		}
 	private:
 		M_RealValueType m_Data;
 	};
