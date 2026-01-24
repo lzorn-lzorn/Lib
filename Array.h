@@ -8,6 +8,7 @@
 #include <memory>
 #include <print>
 #include <type_traits>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <cassert>
@@ -606,7 +607,11 @@ namespace Potato {
 		[[nodiscard]] Array& operator+=(Array&& other) {}
 		[[nodiscard]] Array& operator+=(std::initializer_list<value_type> list) {}
 	public:
-		constexpr void Clear() noexcept {}
+		constexpr void Clear() noexcept {
+			if (this->m_Data.data.start) {
+				M_EraseElement(this->m_Data.data.start, M_Size());
+			}
+		}
 
 		value_type* Data() noexcept {}
 		const value_type* Data() const noexcept {}
@@ -640,9 +645,15 @@ namespace Potato {
 		 *      - Sort 会返回一个新的数组, 该数组包含排序后的元素.
 		 */
 		template <typename Predicate>
-		[[nodiscard]] constexpr Array Filter(Predicate pred) const {}
+		[[nodiscard]] constexpr Array Filter(Predicate pred) const {
+
+			return *this;
+		}
 		template <typename Predicate>
-		[[nodiscard]] constexpr Array Filter(Predicate pred) {}
+		[[nodiscard]] constexpr Array Filter(Predicate pred) {
+
+			return *this;
+		}
 		template <typename FnTransform>
 		[[nodiscard]] constexpr Array<std::invoke_result_t<FnTransform, value_type>> Transform(FnTransform func) const {}
 		template <typename FnTransform>
@@ -659,13 +670,92 @@ namespace Potato {
 		}
 
 		template <typename Predicate>
-		[[nodiscard]] constexpr size_type Count(Predicate pred) const {}
+		[[nodiscard]] constexpr size_type Count(Predicate pred) const {
+			static_assert(std::is_invocable_r_v<bool, Predicate, const_reference>, "Count 的参数必须是一个返回bool的函数(谓词Predicate)");
+		}
 
-		[[nodiscard]] constexpr bool IsContain(const_reference item) const { return true; }
-		template <typename Predicate>
-		[[nodiscard]] constexpr bool IsContain(Predicate pred) const { return true; }
+		template <typename IsEqual>
+		[[nodiscard]] constexpr bool IsContain(const_reference item, IsEqual equal) const {
+			static_assert(std::is_invocable_r_v<bool, IsEqual, const_reference, const_reference>, 
+				"IsContain: IsEqual must be callable with two const_references and return bool");
+			
+			for (const auto& element : *this) {
+				if (equal(element, item)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		[[nodiscard]] constexpr bool IsContain(const_reference item) const {
+			for (const auto& element : *this) {
+				if (element == item) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		template <typename UnaryPredicate>
+		[[nodiscard]] constexpr bool IsContain(UnaryPredicate pred) const {
+			static_assert(std::is_invocable_r_v<bool, UnaryPredicate, const_reference>, 
+				"IsContain: UnaryPredicate must be callable with const_reference and return bool");
+			
+			for (const auto& element : *this) {
+				if (pred(element)) {
+					return true;
+				}
+			}
+			return false;
+		}
 		template <typename Compare>
-		[[nodiscard]] constexpr Array Sort(Compare comp) { }
+		[[nodiscard]] constexpr Array Sort(Compare comp) {
+			static_assert(std::is_invocable_r_v<bool, Predicate, const_reference>, 
+				"EraseIf: Predicate must be callable with const_reference and return bool");
+			return *this;
+		 }
+
+		 /**
+		  * @brief: 根据谓词删除元素, 返回数组本身的引用, 支持链式调用
+		  * @note: Erase–remove idiom
+		  *      https://en.wikipedia.org/wiki/Erase%E2%80%93remove_idiom
+		  *      https://stackoverflow.com/questions/74857690/why-is-there-a-erase-remove-idiom-for-stdremove-stdremove-if-with-contain
+		  */
+		template <typename Predicate>
+		constexpr Array& EraseIf(Predicate pred) {
+			static_assert(std::is_invocable_r_v<bool, Predicate, const_reference>, 
+				"EraseIf: Predicate must be callable with const_reference and return bool");
+
+			auto first = begin();
+			auto last  = end();
+			
+			// 1. 找到第一个需要删除的元素 (Find-tf optimization)
+			//    这样可以避免对前面不需要删除的元素进行多余的移动操作
+			auto result = first;
+			while (result != last && !pred(*result)) {
+				++result;
+			}
+
+			// 如果没有找到需要删除的元素，直接返回
+			if (result == last) {
+				return *this;
+			}
+
+			// 2. 移动剩余元素 (Move-assignment)
+			//    使用双指针算法，将不需要删除的元素移动到前面
+			for (auto i = result; ++i != last; ) {
+				if (!pred(*i)) {
+					*result = std::move(*i);
+					++result;
+				}
+			}
+
+			// 3. 擦除末尾的废弃元素 (Erase-tail)
+			//    此时 [result, last) 区间内的元素已经是移后状态，可以安全销毁
+			Erase(result, last);
+			
+			return *this;
+		}
 
 		template <typename Ty2>
 		int IsContinuousSubSequence(const Array<Ty2>& sub) const noexcept;
@@ -673,11 +763,20 @@ namespace Potato {
 		bool IsSequence(const Array<Ty2>& sub) const noexcept;
 
 		template <typename Ty2>
-		Array Intersection(const Array<Ty2>& other) const noexcept;
+		Array Intersection(const Array<Ty2>& other) const noexcept{
+
+			return *this;
+		}
 		template <typename Ty2>
-		Array Union(const Array<Ty2>& other) const noexcept;
+		Array Union(const Array<Ty2>& other) const noexcept{
+
+			return *this;
+		}
 		template <typename Ty2>
-		Array Difference(const Array<Ty2>& other) const noexcept;
+		Array Difference(const Array<Ty2>& other) const noexcept{
+
+			return *this;
+		}
 
 		constexpr iterator Insert(const_iterator position, const value_type& value) {
 			return M_Emplace(position, 1, value);
@@ -694,7 +793,7 @@ namespace Potato {
 		constexpr iterator Insert(const_iterator position, InputIterator first, InputIterator last) {
 			if constexpr (std::is_base_of_v<std::forward_iterator_tag, typename std::iterator_traits<InputIterator>::iterator_category>) {
 				const auto count = static_cast<size_type>(std::distance(first, last));
-				pointer ptr = M_InsertHole(position, count, false);
+				pointer ptr = M_InsertHoles(position, count, false);
 				std::copy(first, last, ptr);
 				return iterator(ptr);
 			} else {
@@ -818,14 +917,30 @@ namespace Potato {
 			return M_EmplaceBack(std::forward<Args>(args)...);
 		}
 
-		constexpr iterator Erase(const_iterator position){}
-		constexpr iterator Erase(const_iterator first, const_iterator last){}
-		constexpr iterator EraseAt(const size_type index){}
+		constexpr iterator Erase(const_iterator position) {
+			const difference_type offset = position - cbegin();
+			pointer ptr = this->m_Data.data.start + offset;
+			return iterator(M_EraseElement(ptr, 1));
+		}
+		constexpr iterator Erase(const_iterator first, const_iterator last) {
+			const difference_type offset = first - cbegin();
+			pointer ptr = this->m_Data.data.start + offset;
+			const auto count = static_cast<size_type>(std::distance(first, last));
+			return iterator(M_EraseElement(ptr, count));
+		}
+		constexpr iterator Erase(const_iterator first, const size_t count) {
+			const difference_type offset = first - cbegin();
+			pointer ptr = this->m_Data.data.start + offset;
+			return iterator(M_EraseElement(ptr, count));
+		}
+		constexpr iterator EraseAt(const size_type index) {
+			pointer ptr = this->m_Data.data.start + index;
+			return iterator(M_EraseElement(ptr, 1));
+		}
 		constexpr std::shared_ptr<value_type> EraseAsShared(const size_type index){}
 		constexpr std::unique_ptr<value_type> EraseAsUnique(const size_type index){}
 		constexpr std::optional<value_type> EraseAsOptional(const size_type index){}
-		template <typename Predicate>
-		constexpr iterator EraseIf(Predicate pred){}
+		
 
 
 		/** 
@@ -1107,8 +1222,8 @@ namespace Potato {
 			const auto old_size = static_cast<size_type>(finish - start);
 
 			if (new_size < old_size) {
-				// 内存收缩
-				ShrinkToFit(new_size);
+				// 内存收缩: 移除多余元素
+				M_EraseElement(start + new_size, old_size - new_size);
 			} else if (new_size > old_size) {
 				// 内存扩张, 先检查容量是否足够
 				const auto old_capacity = static_cast<size_type>(end_of_storage - start);
@@ -1118,14 +1233,14 @@ namespace Potato {
 					return ;
 				}
 				// old_capacity 还够用, 则不分配内存直接使用存货
-				auto new_strat = start + new_size;
+				pointer construct_pos = finish;
 				auto increased_size = new_size - old_size;
 
 				if constexpr (std::is_same_v<ResizeType, ZeroInitTag>) {
-					finish = std::uninitialized_value_construct_n(new_strat, increased_size);
+					finish = std::uninitialized_value_construct_n(construct_pos, increased_size);
 				}else {
 					// 默认路径: 使用 val 进行 resize
-					finish = std::uninitialized_fill_n(new_strat, increased_size, value);
+					finish = std::uninitialized_fill_n(construct_pos, increased_size, value);
 				}
 			}
 		}
@@ -1367,8 +1482,48 @@ namespace Potato {
 			auto& M_Data    = this->m_Data.data;
 
 			const size_type old_size     = M_Size();
+
+			// 1. Fast Path: 不需要扩容
+			//    在现有 capacity 内移动元素，并确保 Hole 区域是 Valid Object (Default Constructed)
+			if (static_cast<size_type>(M_Data.end_of_storage - M_Data.finish) >= count) {
+				pointer old_finish = M_Data.finish;
+				const size_type elems_after = old_finish - pos;
+
+				if (pos == old_finish) {
+					if (is_zero_construct) {
+						M_Data.finish = std::uninitialized_value_construct_n(old_finish, count);
+					} else {
+						M_Data.finish = std::uninitialized_default_construct_n(old_finish, count);
+					}
+					return old_finish;
+				}
+
+				if (elems_after > count) {
+					std::uninitialized_move(old_finish - count, old_finish, old_finish);
+					M_Data.finish += count; 
+					std::move_backward(pos, old_finish - count, old_finish);
+					if (is_zero_construct) {
+						std::fill_n(pos, count, value_type{});
+					}
+				} else {
+					std::uninitialized_move(pos, old_finish, pos + count);
+					M_Data.finish += count;
+					
+					// 填充 Hole: [pos, pos+count)
+					// 其中 [pos, old_finish) 是 moved-from (已构造)
+					// [old_finish, pos+count) 是未初始化
+					if (is_zero_construct) {
+						std::fill(pos, old_finish, value_type{});
+						std::uninitialized_value_construct(old_finish, pos + count);
+					} else {
+						std::uninitialized_default_construct(old_finish, pos + count);
+					}
+				}
+				return pos;
+			}
+
+			// 2. Slow Path: 需要扩容
 			const size_type new_capacity = M_CalculateGrowth(old_size + count);
-			
 			const size_type forward_size = static_cast<size_type>(pos - M_Data.start);
 			const size_type backward_size = static_cast<size_type>(M_Data.finish - pos);
 
@@ -1379,10 +1534,10 @@ namespace Potato {
 
 			ReallocateGuard Guard{
 				.allocator = allocator,
-				.new_start = new_arr,
+				.new_start = new_start,
 				.new_capacity = new_capacity,
-				.constructed_start = appended_start,
-				.constructed_finish = appended_start
+				.constructed_start = new_start,
+				.constructed_finish = new_start
 			};
 			
 			if constexpr (TypeTools::IsSimpleAllocVal<M_AllocatorType> && std::is_trivially_copyable_v<ElementType>) {
@@ -1395,21 +1550,21 @@ namespace Potato {
 				// 即使不 zero construct，对于 trivial 类型，内存已经是分配状态，逻辑上可以说既是 initialized 也是 uninitialized
 				Guard.Release();
 			} else {
-				// 1. Move前半部分
+				// 1. Move 前半部分
 				M_TryUninitializedMove(M_Data.start, forward_size, new_start);
-				Guard._c_finish = new_hole_start;
+				Guard.constructed_finish = new_hole_start;
 
-				// 2. 插入空洞
+				// 2. 构造 Gap
 				if (is_zero_construct) {
-					Guard._c_finish = std::uninitialized_value_construct_n(Guard._c_finish, count);
+					Guard.constructed_finish = std::uninitialized_value_construct_n(Guard.constructed_finish, count);
 				} else {
 					// 确保非 trivial 类型也被构造，避免 UB
-					Guard._c_finish = std::uninitialized_default_construct_n(Guard._c_finish, count);
+					Guard.constructed_finish = std::uninitialized_default_construct_n(Guard.constructed_finish, count);
 				}
 
-				// 3. Move后半部分
+				// 3. Move 后半部分
 				M_TryUninitializedMove(pos, backward_size, new_backward_start);
-				Guard._c_finish = new_finish;
+				Guard.constructed_finish = new_finish;
 				Guard.Release();
 			}
 
@@ -1433,9 +1588,6 @@ namespace Potato {
 			}
 		}
 		
-		void M_Swap(pointer& lhs, pointer& rhs) noexcept {
-			std::swap(lhs, rhs);
-		}
 		pointer M_EraseElement(pointer pos, const size_type count) {
 			auto& M_Data = this->m_Data.data;
 
