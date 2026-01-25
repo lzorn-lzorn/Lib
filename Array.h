@@ -34,16 +34,6 @@ namespace Potato {
 				&& std::is_same_v<typename std::allocator_traits<Alloc>::const_pointer, const typename Alloc::value_type*>;
 	}
 	namespace MemoryTools{
-		template <typename Container>
-		struct [[nodiscard]] CleanGuard {
-			Container* container;
-			constexpr ~CleanGuard() {
-				if (container) {
-					container->M_Clear();
-				}
-			}
-		};
-
 		struct ZeroConstructCompressedTag{
 			explicit ZeroConstructCompressedTag() = default;
 		};
@@ -515,6 +505,10 @@ namespace Potato {
 			pointer end_of_storage { nullptr };  // 指向分配内存的末尾
 		};
 	public:
+		/**
+		 * 为什么 C++ Allocator 不受欢迎
+		 * https://softwareengineering.stackexchange.com/questions/238037/why-stdallocators-are-not-that-popular
+		 */
 		using value_type             = ElementType;
 		using allocator_type         = AllocatorType;
 		using size_type              = typename M_AllocatorTraits::size_type;
@@ -823,10 +817,14 @@ namespace Potato {
 		}
 
 		constexpr void InsertUninitializedItem(const_iterator position) {
-			M_InsertHoles(position, 1, false);
+			const difference_type offset = position - cbegin();
+			pointer ptr = this->m_Data.data.start + offset;
+			M_InsertHoles(ptr, 1, false);
 		}
 		constexpr void InsertUninitializedItem(const_iterator position, const size_type count) {
-			M_InsertHoles(position, count, false);
+			const difference_type offset = position - cbegin();
+			pointer ptr = this->m_Data.data.start + offset;
+			M_InsertHoles(ptr, count, false);
 		}
 		constexpr reference InsertZeroedItem(const_iterator position) {
 			return *M_InsertHoles(position, 1, true);
@@ -835,9 +833,7 @@ namespace Potato {
 			return *M_InsertHoles(position, count, true);
 		}
 
-		constexpr iterator InsertUnique(size_type index, value_type& value) {}
-		constexpr iterator InsertUnique(size_type index, const value_type& value) {}
-
+		
 		/**
 		 * @brief: Append系列API: 追加元素到数组末尾, 返回数组本身的引用, 支持链式调用
 		 *  - 可以追加单个元素:
@@ -887,7 +883,7 @@ namespace Potato {
 			requires (!std::is_integral_v<InputIterator>)
 		constexpr Array& Append(InputIterator first, InputIterator last) {
 			if constexpr (std::is_base_of_v<std::forward_iterator_tag, typename std::iterator_traits<InputIterator>::iterator_category>) {
-				const auto count = static_cast<size_type>(std::distance(first, last));
+				const auto count = static_cast<size_t>(std::distance(first, last));
 				M_AppendRange(first, count);
 			} else {
 				for (; first != last; ++first) {
@@ -937,10 +933,75 @@ namespace Potato {
 			pointer ptr = this->m_Data.data.start + index;
 			return iterator(M_EraseElement(ptr, 1));
 		}
-		constexpr std::shared_ptr<value_type> EraseAsShared(const size_type index){}
-		constexpr std::unique_ptr<value_type> EraseAsUnique(const size_type index){}
-		constexpr std::optional<value_type> EraseAsOptional(const size_type index){}
-		
+		constexpr std::shared_ptr<value_type> EraseAsShared(const size_type index) {
+			if (index >= this->Size()) [[unlikely]] {
+				return nullptr;
+			}
+			auto& item = this->At(index);
+			
+			using ElementObject = std::remove_pointer_t<value_type>;
+
+			if constexpr (std::is_pointer_v<value_type>) {
+				// 情况 A: 存储的是指针 T* -> 转换为 shared_ptr<T> 接管所有权
+				// 注意：假设该指针指向堆内存且可以被 delete
+				std::shared_ptr<ElementObject> ptr(item);
+				item = nullptr; 
+				EraseAt(index);
+				return ptr;
+			} else {
+				// 情况 B: 存储的是实体 T
+				if constexpr (std::is_move_constructible_v<ElementObject>) {
+					auto ptr = std::make_shared<ElementObject>(std::move(item));
+					EraseAt(index);
+					return ptr;
+				} else {
+					// 不支持移动构造，退化为拷贝
+					auto ptr = std::make_shared<ElementObject>(item);
+					EraseAt(index);
+					return ptr;
+				}
+			}
+		}
+
+		constexpr std::unique_ptr<value_type> EraseAsUnique(const size_type index) {
+			if (index >= this->Size()) [[unlikely]] {
+				return nullptr;
+			}
+			auto& item = this->At(index);
+
+			using ElementObject = std::remove_pointer_t<value_type>;
+
+			if constexpr (std::is_pointer_v<value_type>) {
+				// 情况 A: 接管裸指针所有权
+				std::unique_ptr<ElementObject> ptr(item);
+				item = nullptr;
+				EraseAt(index);
+				return ptr;
+			} else {
+				static_cast(std::is_move_constructible_v<ElementObject>, "对象类型不支持移动构造，无法转移所有权");
+				auto ptr = std::make_unique<ElementObject>(std::move(item));
+				EraseAt(index);
+				return ptr;
+			}
+		}
+
+		// Optional 一般用于值类型，对于指针 optional<T*> 也是合法的，保持原样即可
+		constexpr std::optional<value_type> EraseAsOptional(const size_type index) {
+			if (index >= this->Size()) [[unlikely]] {
+				return std::nullopt;
+			}
+			auto& item = this->At(index);
+
+			if constexpr (std::is_move_constructible_v<value_type>) {
+				std::optional<value_type> opt(std::move(item));
+				EraseAt(index);
+				return opt;
+			} else {
+				std::optional<value_type> opt(item);
+				EraseAt(index);
+				return opt;
+			}
+		}
 
 
 		/** 
@@ -1021,7 +1082,66 @@ namespace Potato {
 		}
 		size_type Slack() const noexcept {}
 
-		void ShrinkToFit() noexcept {}
+
+		/**
+		 * @brief 收缩数组容量以适应当前大小, 其内部会重新找一个块更小的内存, 然后集体移动
+		 * @note: C++标准中的 shrink_to_fit 不支持原地调整, 即必须归还一模一样大小的内存块, 不多也不少, 也不能只归还一部分
+		 *    所以一个合理的实现是: Shirk-to-Fit = Allocate New + Move + Deallocate Old
+		 * 
+		 *    https://en.cppreference.com/w/cpp/container/vector/shrink_to_fit
+		 *    https://en.cppreference.com/w/cpp/memory/allocator/deallocate
+		 *    https://stackoverflow.com/questions/38771551/why-does-stdallocatordeallocate-require-a-size
+		 *
+		 */
+		void ShrinkToFit() {
+			auto& allocator         = M_GetAllocator();
+			auto& M_Data            = this->m_Data.data;
+			pointer& start          = M_Data.start;
+			pointer& finish         = M_Data.finish;
+			pointer& end_of_storage = M_Data.end_of_storage;
+
+			if (start == finish) [[unlikely]] {
+				// 如果数组为空，释放所有内存
+				M_Clear();
+				return;
+			}
+
+			const size_type current_size = M_Size();
+			const size_type current_capacity = M_Capacity();
+			if (current_size == current_capacity) {
+				// 容量已经正好等于大小，无需收缩
+				return;
+			}
+
+			// 分配刚好够用的新内存
+			pointer new_start = allocator.allocate(current_size);
+			pointer new_finish = new_start + current_size;
+
+			// 使用 REALLOCATE GUARD 保证异常安全
+			ReallocateGuard Guard{
+				.allocator = allocator,
+				.new_start = new_start,
+				.new_capacity = current_size,
+				.constructed_start = new_start,
+				.constructed_finish = new_start
+			};
+
+			// 移动旧元素到新内存
+			// Move 也是有可能抛异常的，所以需要 Guard
+			M_TryUninitializedMove(start, current_size, new_start);
+			Guard.constructed_finish = new_finish; // 标记所有元素已构造
+
+			// 销毁旧对象并释放旧内存
+			std::destroy(start, finish);
+			allocator.deallocate(start, current_capacity);
+
+			// 更新指针
+			start          = new_start;
+			finish         = new_finish;
+			end_of_storage = new_finish; // capacity == size
+
+			Guard.Release(); // 成功完成，解除守卫
+		}
 
 	public:
 		[[nodiscard]] constexpr iterator begin() noexcept {
@@ -1588,7 +1708,7 @@ namespace Potato {
 			}
 		}
 		
-		pointer M_EraseElement(pointer pos, const size_type count) {
+		pointer M_EraseElement(pointer pos, const size_t count) {
 			auto& M_Data = this->m_Data.data;
 
 			pointer new_finish = std::move(pos + count, M_Data.finish, pos);
@@ -1655,14 +1775,22 @@ template <typename Ty1, typename Ty2>
 	requires std::is_convertible_v<Ty2, Ty1>
 int IsContinuousSubSequence(const Array<Ty1>& origin, const Array<Ty2>& sub);
 
-bool operator==(const Array& lhs, const Array& rhs) noexcept {
-
+template <typename T, typename Alloc>
+bool operator==(const Array<T, Alloc>& lhs, const Array<T, Alloc>& rhs) noexcept {
+	if (lhs.Size() != rhs.Size()) {
+		return false;
+	}
+	return std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
-bool operator!=(const Array& lhs, const Array& rhs) noexcept {
 
+template <typename T, typename Alloc>
+bool operator!=(const Array<T, Alloc>& lhs, const Array<T, Alloc>& rhs) noexcept {
+	return !(lhs == rhs);
 }
-bool operator<=>(const Array& lhs, const Array& rhs) noexcept {
 
+template <typename T, typename Alloc>
+auto operator<=>(const Array<T, Alloc>& lhs, const Array<T, Alloc>& rhs) noexcept {
+	return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
 }
 
 /**
