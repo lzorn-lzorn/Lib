@@ -1,18 +1,21 @@
 #ifndef ARRAY_HPP
 #define ARRAY_HPP
 
+#include <iostream>
 #include <memory>
 #include <new>
 #include <vector>
 #include <compare>
-#include <memory>
-#include <print>
 #include <type_traits>
 #include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <cassert>
 #include <optional>
+#include <stdexcept>
+#include <algorithm>
+#include <cstring>
+#include <limits>
 
 namespace Potato {
 	namespace TypeTools {
@@ -60,7 +63,7 @@ namespace Potato {
 			constexpr Compressed& GetFirst() noexcept {
 				return *this;
 			}
-			constexpr Compressed& GetFirst() const noexcept {
+			constexpr const Compressed& GetFirst() const noexcept {
 				return *this;
 			}
 
@@ -84,7 +87,7 @@ namespace Potato {
 			constexpr Compressed& GetFirst() noexcept {
 				return first;
 			}
-			constexpr Compressed& GetFirst() const noexcept {
+			constexpr const Compressed& GetFirst() const noexcept {
 				return first;
 			}
 		};
@@ -108,7 +111,7 @@ namespace Potato {
 		template <class Ptr>
 		constexpr auto UnfancyMaybeNull(Ptr ptr) noexcept {
 			// converts from a (potentially null) fancy pointer to a plain pointer
-			return ptr ? _STD addressof(*ptr) : nullptr;
+			return ptr ? std::addressof(*ptr) : nullptr;
 		}
 
 		template <class Ty>
@@ -310,9 +313,6 @@ namespace Potato {
 		[[nodiscard]] constexpr pointer operator->() const noexcept {
 			return ptr;
 		}
-		[[nodiscard]] constexpr pointer operator->() const noexcept {
-			return ptr;
-		}
 
 		[[nodiscard]] constexpr reference operator[](const difference_type index) const noexcept {
 			return *(*this + index);
@@ -352,6 +352,10 @@ namespace Potato {
 
 		constexpr ArrayConstIterator& operator+=(const difference_type offset) noexcept {
 			ptr += offset;
+			return *this;
+		}
+		constexpr ArrayConstIterator& operator-=(const difference_type offset) noexcept {
+			ptr -= offset;
 			return *this;
 		}
 		[[nodiscard]] constexpr ArrayConstIterator operator+(const difference_type n) const noexcept {
@@ -457,7 +461,6 @@ namespace Potato {
 			return temp;
 		}
 
-		using Base::operator-;
 	};
 
 
@@ -588,47 +591,171 @@ namespace Potato {
 		Array(std::initializer_list<value_type> list, const AllocatorType& allocator=AllocatorType())
 			noexcept (std::is_nothrow_copy_constructible_v<AllocatorType>)
 			: Array(list.begin(), list.end(), allocator) /* 委托构造 */ { }
-		constexpr Array(const Array& other) {}
-		constexpr Array(Array&& other) noexcept {}
+		constexpr Array(const Array& other) : m_Data(MemoryTools::OneConstructCompressedTag{}, other.M_GetAllocator()) {
+			if (other.IsEmpty()) return;
+			M_AllocateUninitializedMemory(other.Capacity());
+			CleanGuard Guard{ this };
+			auto& M_Data = this->m_Data.data;
+			M_Data.finish = std::uninitialized_copy(other.begin(), other.end(), M_Data.start);
+			Guard.Release();
+		}
+
+		constexpr Array(Array&& other) noexcept : m_Data(MemoryTools::OneConstructCompressedTag{}, std::move(other.M_GetAllocator())) {
+			auto& M_Data = this->m_Data.data;
+			auto& OtherData = other.m_Data.data;
+			M_Data.start = OtherData.start;
+			M_Data.finish = OtherData.finish;
+			M_Data.end_of_storage = OtherData.end_of_storage;
+			
+			OtherData.start = nullptr;
+			OtherData.finish = nullptr;
+			OtherData.end_of_storage = nullptr;
+		}
 
 	public:
-		[[nodiscard]] constexpr Array& operator=(const Array& other) {}
-		[[nodiscard]] constexpr Array& operator=(Array&& other) noexcept {}
-		[[nodiscard]] constexpr Array& operator=(std::initializer_list<value_type> list) {}
-		[[nodiscard]] constexpr reference operator[](const size_type index) noexcept {}
-		[[nodiscard]] constexpr const_reference operator[](const size_type index) const noexcept {}
-		[[nodiscard]] Array& operator+=(const Array& other) {}
-		[[nodiscard]] Array& operator+=(Array&& other) {}
-		[[nodiscard]] Array& operator+=(std::initializer_list<value_type> list) {}
+		[[nodiscard]] constexpr Array& operator=(const Array& other) {
+			if (this != &other) {
+				if constexpr (M_AllocatorTraits::propagate_on_container_copy_assignment::value) {
+					if (M_GetAllocator() != other.M_GetAllocator()) {
+						M_Clear();
+					}
+					M_GetAllocator() = other.M_GetAllocator();
+				}
+				Assign(other.begin(), other.end());
+			}
+			return *this;
+		}
+
+		[[nodiscard]] constexpr Array& operator=(Array&& other) noexcept {
+			if (this != &other) {
+				M_Clear();
+				if constexpr (M_AllocatorTraits::propagate_on_container_move_assignment::value) {
+					M_GetAllocator() = std::move(other.M_GetAllocator());
+				}				
+				auto& M_Data = this->m_Data.data;
+				auto& OtherData = other.m_Data.data;
+				M_Data.start = OtherData.start;
+				M_Data.finish = OtherData.finish;
+				M_Data.end_of_storage = OtherData.end_of_storage;
+
+				OtherData.start = nullptr;
+				OtherData.finish = nullptr;
+				OtherData.end_of_storage = nullptr;
+			}
+			return *this;
+		}
+
+		[[nodiscard]] constexpr Array& operator=(std::initializer_list<value_type> list) {
+			Assign(list.begin(), list.end());
+			return *this;
+		}
+
+        // Destructor: ensure allocated memory is released when the Array is destroyed
+        ~Array() noexcept {
+            M_Clear();
+        }
+
+		[[nodiscard]] constexpr reference operator[](const size_type index) noexcept {
+			return m_Data.data.start[index];
+		}
+
+		[[nodiscard]] constexpr const_reference operator[](const size_type index) const noexcept {
+			return m_Data.data.start[index];
+		}
+
+		[[nodiscard]] Array& operator+=(const Array& other) {
+			Append(other);
+			return *this;
+		}
+
+		[[nodiscard]] Array& operator+=(Array&& other) {
+			Append(std::move(other));
+			return *this;
+		}
+
+		[[nodiscard]] Array& operator+=(std::initializer_list<value_type> list) {
+			Append(list);
+			return *this;
+		}
 	public:
 		constexpr void Clear() noexcept {
-			if (this->m_Data.data.start) {
-				M_EraseElement(this->m_Data.data.start, M_Size());
+			auto& M_Data = this->m_Data.data;
+			if (M_Data.start) {
+				std::destroy(M_Data.start, M_Data.finish);
+				M_Data.finish = M_Data.start;
 			}
 		}
 
-		value_type* Data() noexcept {}
-		const value_type* Data() const noexcept {}
+		value_type* Data() noexcept { return m_Data.data.start; }
+		const value_type* Data() const noexcept { return m_Data.data.start; }
 
-		void Assign(size_type count, const value_type& value) {}
+		void Assign(size_type count, const value_type& value) {
+			Clear();
+			if (count > M_Capacity()) {
+				M_Clear();
+				M_FillValueConstruct(count, value);
+			} else {
+				M_Resize(count, value);
+			}
+		}
+
 		template <typename InputIterator>
-		constexpr void Assign(InputIterator first, InputIterator last) {}
-		constexpr void Assign(std::initializer_list<value_type> list) {}
+		constexpr void Assign(InputIterator first, InputIterator last) {
+			Clear();
+			Append(first, last);
+		}
+
+		constexpr void Assign(std::initializer_list<value_type> list) {
+			Assign(list.begin(), list.end());
+		}
 
 		// @brief: 访问数组元素访问 API 
-		[[nodiscard]] constexpr reference At(const size_type index) {}
-		[[nodiscard]] constexpr const_reference At(const size_type index) const {}
-		[[nodiscard]] constexpr reference Front(const size_type index) {}
-		[[nodiscard]] constexpr const_reference Front(const size_type index) const {}
-		[[nodiscard]] constexpr reference Back(const size_type index) {}
-		[[nodiscard]] constexpr const_reference Back(const size_type index) const {}
+		[[nodiscard]] constexpr reference At(const size_type index) {
+			if (index >= Size()) {
+				throw std::out_of_range("Array::At: Index out of range");
+			}
+			return (*this)[index];
+		}
 
-		[[nodiscard]] constexpr size_type Find(const_reference item) const {}
-		[[nodiscard]] constexpr size_type Find(const_reference item) {}
+		[[nodiscard]] constexpr const_reference At(const size_type index) const {
+			if (index >= Size()) {
+				throw std::out_of_range("Array::At: Index out of range");
+			}
+			return (*this)[index];
+		}
+
+		[[nodiscard]] constexpr reference Front() { return *begin(); }
+		[[nodiscard]] constexpr const_reference Front() const { return *begin(); }
+		[[nodiscard]] constexpr reference Back() { return *(end() - 1); }
+		[[nodiscard]] constexpr const_reference Back() const { return *(end() - 1); }
+
+
+		[[nodiscard]] constexpr size_type Find(const_reference item) const {
+			for (size_type i = 0; i < Size(); ++i) {
+				if (m_Data.data.start[i] == item) return i;
+			}
+			return static_cast<size_type>(-1);
+		}
+		[[nodiscard]] constexpr size_type Find(const_reference item) {
+			for (size_type i = 0; i < Size(); ++i) {
+				if (m_Data.data.start[i] == item) return i;
+			}
+			return static_cast<size_type>(-1);
+		}
 		template <typename Predicate>
-		[[nodiscard]] constexpr size_type FindIf(Predicate pred) const {}
+		[[nodiscard]] constexpr size_type FindIf(Predicate pred) const {
+			for (size_type i = 0; i < Size(); ++i) {
+				if (pred(m_Data.data.start[i])) return i;
+			}
+			return static_cast<size_type>(-1);
+		}
 		template <typename Predicate>
-		[[nodiscard]] constexpr size_type FindIf(Predicate pred) {}
+		[[nodiscard]] constexpr size_type FindIf(Predicate pred) {
+			for (size_type i = 0; i < Size(); ++i) {
+				if (pred(m_Data.data.start[i])) return i;
+			}
+			return static_cast<size_type>(-1);
+		}
 
 		/**
 		 * @brief: 函数式API, 它们都不会修改原有数组的值, 而是返回一个新的数组或者值
@@ -640,18 +767,44 @@ namespace Potato {
 		 */
 		template <typename Predicate>
 		[[nodiscard]] constexpr Array Filter(Predicate pred) const {
-
-			return *this;
+			Array result;
+			for (const auto& item : *this) {
+				if (pred(item)) {
+					result.Append(item);
+				}
+			}
+			return result;
 		}
 		template <typename Predicate>
 		[[nodiscard]] constexpr Array Filter(Predicate pred) {
-
-			return *this;
+			Array result;
+			for (const auto& item : *this) {
+				if (pred(item)) {
+					result.Append(item);
+				}
+			}
+			return result;
 		}
 		template <typename FnTransform>
-		[[nodiscard]] constexpr Array<std::invoke_result_t<FnTransform, value_type>> Transform(FnTransform func) const {}
+		[[nodiscard]] constexpr auto Transform(FnTransform func) const {
+			using NewType = std::invoke_result_t<FnTransform, value_type>;
+			Array<NewType> result;
+			result.Reserve(Size());
+			for (const auto& item : *this) {
+				result.Append(func(item));
+			}
+			return result;
+		}
 		template <typename FnTransform>
-		[[nodiscard]] constexpr Array<std::invoke_result_t<FnTransform, value_type>> Transform(FnTransform func) {}
+		[[nodiscard]] constexpr auto Transform(FnTransform func) {
+			using NewType = std::invoke_result_t<FnTransform, value_type>;
+			Array<NewType> result;
+			result.Reserve(Size());
+			for (const auto& item : *this) {
+				result.Append(func(item));
+			}
+			return result;
+		}
 
 		[[nodiscard]] constexpr size_type Count(const_reference item) const {
 			size_type count = 0;
@@ -666,6 +819,13 @@ namespace Potato {
 		template <typename Predicate>
 		[[nodiscard]] constexpr size_type Count(Predicate pred) const {
 			static_assert(std::is_invocable_r_v<bool, Predicate, const_reference>, "Count 的参数必须是一个返回bool的函数(谓词Predicate)");
+			size_type count = 0;
+			for (const auto& element : *this) {
+				if (pred(element)) {
+					++count;
+				}
+			}
+			return count;
 		}
 
 		template <typename IsEqual>
@@ -704,7 +864,7 @@ namespace Potato {
 		}
 		template <typename Compare>
 		[[nodiscard]] constexpr Array Sort(Compare comp) {
-			static_assert(std::is_invocable_r_v<bool, Predicate, const_reference>, 
+			static_assert(std::is_invocable_r_v<bool, Compare, const_reference>, 
 				"EraseIf: Predicate must be callable with const_reference and return bool");
 			return *this;
 		 }
@@ -779,7 +939,8 @@ namespace Potato {
 			return M_Emplace(position, 1, std::move(value));
 		}
 		constexpr iterator Insert(const_iterator position, size_type count, const value_type& value) {
-			pointer ptr = M_InsertHole(position, count, false);
+			const difference_type offset = position - cbegin();
+			pointer ptr = M_InsertHoles(this->m_Data.data.start + offset, count, false);
 			std::fill_n(ptr, count, value);
 			return iterator(ptr);
 		}
@@ -787,17 +948,16 @@ namespace Potato {
 		constexpr iterator Insert(const_iterator position, InputIterator first, InputIterator last) {
 			if constexpr (std::is_base_of_v<std::forward_iterator_tag, typename std::iterator_traits<InputIterator>::iterator_category>) {
 				const auto count = static_cast<size_type>(std::distance(first, last));
-				pointer ptr = M_InsertHoles(position, count, false);
+				const difference_type offset = position - cbegin();
+				pointer ptr = M_InsertHoles(this->m_Data.data.start + offset, count, false);
 				std::copy(first, last, ptr);
 				return iterator(ptr);
 			} else {
-				// InputIterator cannot calculate count, so we can't use M_InsertHole easily without buffering or repeated inserts
-				// Repeated inserts is the standard way for InputIterator
 				difference_type offset = position - cbegin();
 				for (; first != last; ++first) {
 					position = Insert(begin() + offset, *first);
 					offset++;
-					position++; // Point to next slot
+					position++; 
 				}
 				return begin() + offset; 
 			}
@@ -827,10 +987,12 @@ namespace Potato {
 			M_InsertHoles(ptr, count, false);
 		}
 		constexpr reference InsertZeroedItem(const_iterator position) {
-			return *M_InsertHoles(position, 1, true);
+			const difference_type offset = position - cbegin();
+			return *M_InsertHoles(this->m_Data.data.start + offset, 1, true);
 		}
 		constexpr reference InsertZeroedItem(const_iterator position, const size_type count) {
-			return *M_InsertHoles(position, count, true);
+			const difference_type offset = position - cbegin();
+			return *M_InsertHoles(this->m_Data.data.start + offset, count, true);
 		}
 
 		
@@ -898,7 +1060,6 @@ namespace Potato {
 			M_EmplaceBack(std::forward<Args>(args)...);
 			return *this;
 		}
-
 		template <typename ... Args>
 		constexpr iterator Emplace(const_iterator position, Args&& ... args) {
 			return M_Emplace(position, 1, std::forward<Args>(args)...);
@@ -978,7 +1139,7 @@ namespace Potato {
 				EraseAt(index);
 				return ptr;
 			} else {
-				static_cast(std::is_move_constructible_v<ElementObject>, "对象类型不支持移动构造，无法转移所有权");
+				// static_cast(std::is_move_constructible_v<ElementObject>, "对象类型不支持移动构造，无法转移所有权");
 				auto ptr = std::make_unique<ElementObject>(std::move(item));
 				EraseAt(index);
 				return ptr;
@@ -1036,7 +1197,7 @@ namespace Potato {
 		 * 		data.pop_back();        // 2. Remove: 必须不抛异常
 		 * 		return result;          // 3. Return: 可能涉及 Copy/Move 可能抛异常
 		 * }
-		 * 如果 3. 抛出异常, 则数据没有的同时也了抛出了异常
+		 * 如果 3. 抛出异常, 则数据没有的同时时也了抛出了异常
 		 * 
 		 * 其他语言之所以可以实现, 因为其底层的对象模型都是以指针,引用的形式进行的. 
 		 * 而指针和引用都是轻量级的, 复制和移动都不会抛出异常. 来回移动的只是指针, 真正
@@ -1065,10 +1226,44 @@ namespace Potato {
 			return *(end() - 1);
 		}
 
-		constexpr void Resize(size_type count) {}
-		constexpr void Resize(size_type count, const value_type& value) {}
-		constexpr void Reserve(size_type capacity) {}
-		constexpr void Swap(Array& other) noexcept {}
+		constexpr void Resize(size_type count) {
+			M_Resize(count, ZeroInitTag{});
+		}
+		constexpr void Resize(size_type count, const value_type& value) {
+			M_Resize(count, value);
+		}
+		constexpr void Reserve(size_type capacity) {
+			if (capacity <= Capacity()) return;
+			
+			auto& allocator = M_GetAllocator();
+			auto& M_Data = this->m_Data.data;
+			
+			pointer new_start = allocator.allocate(capacity);
+			size_type current_size = M_Size();
+			
+			M_TryUninitializedMove(M_Data.start, current_size, new_start);
+			
+			if (M_Data.start) {
+				std::destroy(M_Data.start, M_Data.finish);
+				allocator.deallocate(M_Data.start, M_Data.end_of_storage - M_Data.start);
+			}
+			
+			M_Data.start = new_start;
+			M_Data.finish = new_start + current_size;
+			M_Data.end_of_storage = new_start + capacity;
+		}
+		constexpr void Swap(Array& other) noexcept {
+			if (this == &other) return;
+			
+			using std::swap;
+			swap(m_Data.data.start, other.m_Data.data.start);
+			swap(m_Data.data.finish, other.m_Data.data.finish);
+			swap(m_Data.data.end_of_storage, other.m_Data.data.end_of_storage);
+			
+			if constexpr (M_AllocatorTraits::propagate_on_container_swap::value) {
+				swap(M_GetAllocator(), other.M_GetAllocator());
+			}
+		}
 		
 	
 		bool IsEmpty() const noexcept {
@@ -1080,7 +1275,9 @@ namespace Potato {
 		size_type Capacity() const noexcept {
 			return M_Capacity();
 		}
-		size_type Slack() const noexcept {}
+		size_type Slack() const noexcept {
+			return Capacity() - Size();
+		}
 
 
 		/**
@@ -1094,54 +1291,30 @@ namespace Potato {
 		 *
 		 */
 		void ShrinkToFit() {
-			auto& allocator         = M_GetAllocator();
-			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.start;
-			pointer& finish         = M_Data.finish;
-			pointer& end_of_storage = M_Data.end_of_storage;
-
-			if (start == finish) [[unlikely]] {
-				// 如果数组为空，释放所有内存
+			if (IsEmpty()) {
 				M_Clear();
 				return;
 			}
+			if (Slack() == 0) return;
 
-			const size_type current_size = M_Size();
-			const size_type current_capacity = M_Capacity();
-			if (current_size == current_capacity) {
-				// 容量已经正好等于大小，无需收缩
-				return;
-			}
-
-			// 分配刚好够用的新内存
+			auto& allocator         = M_GetAllocator();
+			auto& M_Data            = this->m_Data.data;
+			
+			size_type current_size = M_Size();
 			pointer new_start = allocator.allocate(current_size);
-			pointer new_finish = new_start + current_size;
-
-			// 使用 REALLOCATE GUARD 保证异常安全
-			ReallocateGuard Guard{
-				.allocator = allocator,
-				.new_start = new_start,
-				.new_capacity = current_size,
-				.constructed_start = new_start,
-				.constructed_finish = new_start
-			};
-
-			// 移动旧元素到新内存
-			// Move 也是有可能抛异常的，所以需要 Guard
-			M_TryUninitializedMove(start, current_size, new_start);
-			Guard.constructed_finish = new_finish; // 标记所有元素已构造
-
-			// 销毁旧对象并释放旧内存
-			std::destroy(start, finish);
-			allocator.deallocate(start, current_capacity);
-
-			// 更新指针
-			start          = new_start;
-			finish         = new_finish;
-			end_of_storage = new_finish; // capacity == size
-
-			Guard.Release(); // 成功完成，解除守卫
+			
+			M_TryUninitializedMove(M_Data.start, current_size, new_start);
+			
+			if (M_Data.start) {
+				std::destroy(M_Data.start, M_Data.finish);
+				allocator.deallocate(M_Data.start, M_Data.end_of_storage - M_Data.start);
+			}
+			
+			M_Data.start = new_start;
+			M_Data.finish = new_start + current_size;
+			M_Data.end_of_storage = new_start + current_size;
 		}
+
 
 	public:
 		[[nodiscard]] constexpr iterator begin() noexcept {
@@ -1205,9 +1378,9 @@ namespace Potato {
 		 *     https://en.cppreference.com/w/cpp/language/destructor.html
 		 *     https://en.cppreference.com/w/cpp/language/throw.html#Stack_unwinding
 		 */
-		template <typename Container>
 		struct [[nodiscard]] CleanGuard {
-			Container* container;
+			Array* container;
+			explicit constexpr CleanGuard(Array* c) noexcept : container(c) {}
 			constexpr ~CleanGuard() {
 				if (container) {
 					container->M_Clear();
@@ -1227,6 +1400,9 @@ namespace Potato {
 			ReallocateGuard& operator=(const ReallocateGuard& other) = delete;
 			ReallocateGuard(const ReallocateGuard& other) = delete;
 
+			constexpr ReallocateGuard(AllocatorType& a, pointer ns, size_type nc, pointer cs, pointer cf) noexcept
+			: allocator(a), new_start(ns), new_capacity(nc), constructed_start(cs), constructed_finish(cf) {}
+
 			constexpr ~ReallocateGuard() noexcept {
 				if (new_start) {
 					MemoryTools::DestroyRange(constructed_start, constructed_finish, allocator);
@@ -1245,6 +1421,9 @@ namespace Potato {
 
 			SimpleReallocateGuard& operator=(const SimpleReallocateGuard& other) = delete;
 			SimpleReallocateGuard(const SimpleReallocateGuard& other) = delete;
+
+			constexpr SimpleReallocateGuard(AllocatorType& a, pointer ns, size_type nc) noexcept
+			: allocator(a), new_start(ns), new_capacity(nc) {}
 
 			constexpr ~SimpleReallocateGuard() noexcept {
 				if (new_start) {
@@ -1267,11 +1446,11 @@ namespace Potato {
 			pointer& finish         = M_Data.finish;
 			pointer& end_of_storage = M_Data.end_of_storage;
 
-			M_InsertHoles(first, count, false);
-
-			start           = mem;
-			finish          = mem;
-			end_of_storage  = mem + count;
+			auto& allocator = M_GetAllocator();
+			pointer mem = allocator.allocate(count);
+			start = mem;
+			finish = mem;
+			end_of_storage = mem + count;
 		}
 		/**
 		 * @brief 拷贝填充构造 -> 对应构造函数 Array(n) -> 其会默认进行零初始化或者默认构造
@@ -1387,13 +1566,7 @@ namespace Potato {
 			const pointer new_arr = allocator.allocate(new_capacity);
 			const pointer appended_start = new_arr + old_size;
 
-			ReallocateGuard Guard{
-				.allocator = allocator,
-				.new_start = new_arr,
-				.new_capacity = new_capacity,
-				.constructed_start = appended_start,
-				.constructed_finish = appended_start
-			};
+			ReallocateGuard Guard{ allocator, new_arr, new_capacity, appended_start, appended_start };
 			auto& appended_finish = Guard.constructed_finish;
 			const auto& increased_size = new_size - old_size;
 			assert(increased_size>=0 && "Array::M_Relocate(const size_type, const Ty2&) Runtime Error:: new_size must be greater than old_size - M_Relocate 默认 new size >= old size");
@@ -1433,19 +1606,17 @@ namespace Potato {
 		}
 
 		[[nodiscard]] constexpr size_type M_CalculateGrowth(const size_type new_size) const {
-			const size_type old_capacity = this->M_Capacity();
-			const auto max_size = this->M_MaxSize();
+			auto old_capacity = this->M_Capacity();
+			auto max_size = this->M_MaxSize();
 
-			if (old_capacity < max_size - old_capacity) {
-				return max_size;
+			if (old_capacity == 0) {
+				size_type cap = std::max<size_type>(1u, new_size);
+				return std::min(cap, max_size);
 			}
 
-			const size_type new_capacity = old_capacity + old_capacity / 2;
-
-			if (new_capacity < new_size) {
-				new_capacity = new_size;
-			}
-
+			size_type new_capacity = old_capacity + old_capacity / 2;
+			if (new_capacity < new_size) new_capacity = new_size;
+			if (new_capacity > max_size) new_capacity = max_size;
 			return new_capacity;
 		}
 
@@ -1457,21 +1628,14 @@ namespace Potato {
 		}
 
 		[[nodiscard]] constexpr size_type M_Capacity() const noexcept {
-			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.start;
-			pointer& finish         = M_Data.finish;
-			pointer& end_of_storage = M_Data.end_of_storage;
-
-			return start ? static_cast<size_type>(end_of_storage - start) : 0u;
+			auto& M_Data = this->m_Data.data;
+			return M_Data.start ? static_cast<size_type>(M_Data.end_of_storage - M_Data.start) : 0u;
 		}
 
 		[[nodiscard]] constexpr size_type M_Size() const noexcept {
 			auto& M_Data            = this->m_Data.data;
-			pointer& start          = M_Data.start;
-			pointer& finish         = M_Data.finish;
-			pointer& end_of_storage = M_Data.end_of_storage;
 
-			return start ? static_cast<size_type>(finish - start) : 0u;
+			return M_Data.start ? static_cast<size_type>(M_Data.finish - M_Data.start) : 0u;
 		}
 
 		[[nodiscard]] constexpr bool M_IsEmpty() const noexcept {
@@ -1652,13 +1816,7 @@ namespace Potato {
 			pointer new_backward_start = new_hole_start + count;
 			pointer new_finish = new_backward_start + backward_size;
 
-			ReallocateGuard Guard{
-				.allocator = allocator,
-				.new_start = new_start,
-				.new_capacity = new_capacity,
-				.constructed_start = new_start,
-				.constructed_finish = new_start
-			};
+			ReallocateGuard Guard{ allocator, new_start, new_capacity, new_start, new_start };
 			
 			if constexpr (TypeTools::IsSimpleAllocVal<M_AllocatorType> && std::is_trivially_copyable_v<ElementType>) {
 				if (forward_size > 0) std::memcpy(new_start, M_Data.start, forward_size * sizeof(ElementType));
@@ -1728,29 +1886,29 @@ namespace Potato {
  * @brief: 多数组交集运算
  * @return: 输出 Array 的类型是所有 Array::value_type 的 intersection type
  */
-template <typename ... Arrays>
-Array Intersection(const Arrays& ... arrays){
+// template <typename ... Arrays>
+// Potato::Array Intersection(const Arrays& ... arrays){
 
-}
+// }
 
 /**
  * @brief: 多数组并集运算
  * @return: 输出 Array 的类型是所有 Array::value_type 的 intersection type
  */
-template <typename ... Arrays>
-Array Union (const Arrays& ... arrays){
+// template <typename ... Arrays>
+// Potato::Array Union (const Arrays& ... arrays){
 
-}
+// }
 
 /**
  * @brief: array1 - array2 差集运算
  * @return: 输出 Array 的类型是 Ty1 和 Ty2 的 difference type
  *    如果不存在 common type, 则返回空 Array
  */
-template <typename Ty1, typename Ty2>
-Array Difference(const Arrays& array1, const Arrays& array2){
+// template <typename Ty1, typename Ty2>
+// Potato::Array Difference(const Potato::Array<Ty1>& array1, const Potato::Array<Ty2>& array2){
 
-}
+// }
 
 /**
  * @brief: 判断 sub 数组是否为 origin 数组的子序列
@@ -1759,9 +1917,9 @@ Array Difference(const Arrays& array1, const Arrays& array2){
  * @note: Ty1 Ty2 必须存在公共类型, 且元素支持 operator==
  * @note: 这里的子序列并不要求是连续的, 只要保持相对顺序即可
  */
-template <typename Ty1, typename Ty2>
-	requires std::is_convertible_v<Ty2, Ty1>
-bool IsSubSequence(const Array<Ty1>& origin, const Array<Ty2>& sub)
+// template <typename Ty1, typename Ty2>
+// 	requires std::is_convertible_v<Ty2, Ty1>
+// bool IsSubSequence(const Potato::Array<Ty1>& origin, const Potato::Array<Ty2>& sub)
 
 
 /**
@@ -1771,12 +1929,12 @@ bool IsSubSequence(const Array<Ty1>& origin, const Array<Ty2>& sub)
  * @return: 如果 sub 是 origin 的连续子序列, 则返回子序列的起始索引, 否则返回 -1
  * @note: Ty1 Ty2 必须存在公共类型, 且元素支持 operator==
  */
-template <typename Ty1, typename Ty2>
-	requires std::is_convertible_v<Ty2, Ty1>
-int IsContinuousSubSequence(const Array<Ty1>& origin, const Array<Ty2>& sub);
+// template <typename Ty1, typename Ty2>
+// 	requires std::is_convertible_v<Ty2, Ty1>
+// int IsContinuousSubSequence(const Potato::Array<Ty1>& origin, const Potato::Array<Ty2>& sub);
 
 template <typename T, typename Alloc>
-bool operator==(const Array<T, Alloc>& lhs, const Array<T, Alloc>& rhs) noexcept {
+bool operator==(const Potato::Array<T, Alloc>& lhs, const Potato::Array<T, Alloc>& rhs) noexcept {
 	if (lhs.Size() != rhs.Size()) {
 		return false;
 	}
@@ -1784,34 +1942,34 @@ bool operator==(const Array<T, Alloc>& lhs, const Array<T, Alloc>& rhs) noexcept
 }
 
 template <typename T, typename Alloc>
-bool operator!=(const Array<T, Alloc>& lhs, const Array<T, Alloc>& rhs) noexcept {
+bool operator!=(const Potato::Array<T, Alloc>& lhs, const Potato::Array<T, Alloc>& rhs) noexcept {
 	return !(lhs == rhs);
 }
 
 template <typename T, typename Alloc>
-auto operator<=>(const Array<T, Alloc>& lhs, const Array<T, Alloc>& rhs) noexcept {
+auto operator<=>(const Potato::Array<T, Alloc>& lhs, const Potato::Array<T, Alloc>& rhs) noexcept {
 	return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
 }
 
 /**
  * @brief: 循环访问器, 用于循环访问数组中的元素
  */
-struct Walker {
-	/**
-	* @brief: 循环访问元素 API: Next / Back 
-	* @bote: 从第一次开始使用Next()/Back()开始, 会依次返回数组中的每一个元素,
-	*     当访问到数组末尾时, 会从头开始继续访问, 形成一个循环访问的效果.
-	*/
-	[[nodiscard]] value_type Next() noexcept {}
-	[[nodiscard]] value_type Back() noexcept {}
-	[[nodiscard]] void SetCursor(int index) noexcept {}
-	template <typename InputIterator>
-	[[nodiscard]] void SetCursor(InputIterator position) noexcept {}
+// struct Walker {
+// 	/**
+// 	* @brief: 循环访问元素 API: Next / Back 
+// 	* @bote: 从第一次开始使用Next()/Back()开始, 会依次返回数组中的每一个元素,
+// 	*     当访问到数组末尾时, 会从头开始继续访问, 形成一个循环访问的效果.
+// 	*/
+// 	[[nodiscard]] value_type Next() noexcept {}
+// 	[[nodiscard]] value_type Back() noexcept {}
+// 	[[nodiscard]] void SetCursor(int index) noexcept {}
+// 	template <typename InputIterator>
+// 	[[nodiscard]] void SetCursor(InputIterator position) noexcept {}
 
-private:
-	int m_Footprint {0};
-	Array<ElementType>* m_World;
-};
+// private:
+// 	int m_Footprint {0};
+// 	Potato::Array<ElementType>* m_World;
+// };
 	
 
 

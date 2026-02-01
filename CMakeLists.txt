@@ -3,6 +3,6 @@ project(PureTest)
 
 set(CMAKE_CXX_STANDARD 23)
 
-add_executable(PureTest test.cpp)
+add_executable(PureTest test_full.cpp)
 
 target_include_directories(PureTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
